@@ -1,16 +1,20 @@
-# Forensics Collection Toolkit
+# Linux Forensics Toolkit
 
-A comprehensive suite of Python tools for processing, sorting, and analyzing forensic collection files from Kaseya IZE collections and UAC (Unix-like Artifacts Collector) tarballs.
+A comprehensive Python toolkit for analyzing Linux forensic collections from UAC (Unix-like Artifacts Collector) tarballs.
+
+## Overview
+
+This toolkit provides a **unified analyzer** that runs multiple forensic analysis tools in parallel, generating comprehensive reports for incident response and threat hunting.
 
 ## Tools Included
 
-| Tool | Description | Use Case |
-|------|-------------|----------|
-| [**linux_login_timeline.py**](README_linux_login_timeline.md) | Extract and timeline Linux login/authentication events | Login forensics |
-| [**linux_binary_analyzer.py**](README_linux_binary_analyzer.md) | Detect suspicious binaries, SUID files, rootkit traces | Malware hunting |
-| [**linux_persistence_hunter.py**](README_linux_persistence_hunter.md) | PANIX-style persistence mechanism detection | Persistence hunting |
-| [**uac_extractor.py**](README_uac_extractor.md) | Extract UAC tarballs from nested ZIP archives | Evidence prep |
-| [**ize_sorter.py**](README_ize_sorter.md) | Sort IZE and UAC files by hostname mapping | Evidence org |
+| Tool | Description |
+|------|-------------|
+| **linux_analyzer.py** | Main orchestrator - runs all analyzers in parallel |
+| **linux_login_timeline.py** | Login/authentication event timeline |
+| **linux_journal_analyzer.py** | Systemd journal analysis |
+| **linux_persistence_hunter.py** | PANIX-style persistence detection |
+| **linux_security_analyzer.py** | Binary/environment security analysis |
 
 ## Requirements
 
@@ -19,263 +23,206 @@ A comprehensive suite of Python tools for processing, sorting, and analyzing for
 
 ## Quick Start
 
-### 1. Extract UAC Tarballs from Evidence ZIPs
+### Run Full Analysis (Recommended)
 
 ```bash
-python uac_extractor.py C:\Evidence\ZipArchives C:\Evidence\ExtractedUAC --keep-zips
+# Analyze a UAC tarball
+python linux_analyzer.py -s hostname.tar.gz
+
+# Analyze an extracted directory
+python linux_analyzer.py -s ./extracted_uac/
+
+# Specify output directory
+python linux_analyzer.py -s hostname.tar.gz -o ./analysis_output/
 ```
 
-### 2. Sort Collections by Hostname
+This creates a folder `[hostname]_analysis/` containing all CSV reports.
+
+### Run Individual Tools
 
 ```bash
-python ize_sorter.py C:\Evidence C:\Mappings\hosts.csv C:\Evidence\Sorted
-```
+# Login timeline only
+python linux_login_timeline.py -s hostname.tar.gz -o timeline.csv
 
-### 3. Generate Login Timelines
+# Persistence hunting only
+python linux_persistence_hunter.py -s hostname.tar.gz -o persistence.csv
 
-```bash
-# Single tarball
-python linux_login_timeline.py -s server01.tar.gz -o server01_timeline.csv --summary
+# Journal analysis only
+python linux_journal_analyzer.py -s hostname.tar.gz -o journal.csv
 
-# Batch process all tarballs
-python linux_login_timeline.py --batch C:\Evidence\ExtractedUAC -o C:\Timelines
-```
-
-### 4. Analyze Binaries and System Integrity
-
-```bash
-# Analyze a UAC tarball for suspicious binaries
-python linux_binary_analyzer.py -s server01.tar.gz -o server01_analysis.csv
-
-# With custom known-bad hash list
-python linux_binary_analyzer.py -s server01.tar.gz -o analysis.csv --hashes iocs.txt
-```
-
-### 5. Hunt for Persistence Mechanisms
-
-```bash
-# Detect PANIX-style persistence
-python linux_persistence_hunter.py -s server01.tar.gz -o server01_persistence.csv
-```
-
-## Complete Workflow
-
-```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│                         EVIDENCE PROCESSING WORKFLOW                          │
-├───────────────────────────────────────────────────────────────────────────────┤
-│                                                                               │
-│  ┌──────────────┐                                                             │
-│  │ ZIP Archives │ ──────┐                                                     │
-│  │ (nested)     │       │                                                     │
-│  └──────────────┘       ▼                                                     │
-│                   ┌─────────────────┐                                         │
-│                   │ uac_extractor   │ ─────► UAC Tarballs (.tar.gz)          │
-│                   │                 │ ─────► Mapping CSV                      │
-│                   └─────────────────┘                                         │
-│                           │                                                   │
-│                           ▼                                                   │
-│  ┌──────────────┐   ┌─────────────────┐                                       │
-│  │ hosts.csv    │──►│  ize_sorter     │ ─────► Sorted Folders                │
-│  │ (mappings)   │   │                 │ ─────► Results CSV + Log             │
-│  └──────────────┘   └─────────────────┘                                       │
-│                           │                                                   │
-│           ┌───────────────┼───────────────────────────┐                       │
-│           ▼               ▼                           ▼                       │
-│   ┌────────────────┐ ┌────────────────┐ ┌─────────────────────┐               │
-│   │ login_timeline │ │ binary_analyzer│ │ persistence_hunter  │               │
-│   │                │ │                │ │ (PANIX detection)   │               │
-│   └───────┬────────┘ └───────┬────────┘ └──────────┬──────────┘               │
-│           │                  │                     │                          │
-│           ▼                  ▼                     ▼                          │
-│   Timeline CSV         Analysis CSV          Persistence CSV                  │
-│   (login events)       (binaries, SUID)      (backdoors, hooks)               │
-│                                                                               │
-└───────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Example Hostname Mapping CSV
-
-Create a CSV file (`hosts.csv`) to map hostnames to products/clients:
-
-```csv
-Hostname,Product
-SERVER-DC01,Acme_Corp
-SERVER-DC02,Acme_Corp
-WORKSTATION-SALES,Acme_Corp
-SQL-PROD,Beta_Industries
-WEB-FRONTEND,Beta_Industries
+# Security/binary analysis only
+python linux_security_analyzer.py -s hostname.tar.gz -o security.csv
 ```
 
 ## Output Files
 
-| Tool | Output |
-|------|--------|
-| **uac_extractor** | Extracted `.tar` files + `uac_mapping_*.csv` |
-| **ize_sorter** | Sorted folders + `ize_sorter_results_*.csv` + `ize_sorter_log_*.txt` |
-| **linux_login_timeline** | `*_timeline.csv` with all login events |
-| **linux_binary_analyzer** | `*_binaries.csv` + `*_environment.csv` |
-| **linux_persistence_hunter** | `persistence_findings.csv` with MITRE ATT&CK mappings |
+When running `linux_analyzer.py`, these files are generated:
 
-## Security Features
+```
+[hostname]_analysis/
+├── [hostname]_login_timeline.csv      # Login/auth events (UTC timestamps)
+├── [hostname]_journal.csv             # All journal entries
+├── [hostname]_journal_security.csv    # Security-relevant journal entries
+├── [hostname]_persistence.csv         # ALL scheduled tasks + persistence findings
+├── [hostname]_security_all.csv        # Combined security findings
+├── [hostname]_security_binaries.csv   # Binary analysis
+├── [hostname]_security_environment.csv # Environment analysis
+└── [hostname]_analysis_summary.txt    # Summary report
+```
 
-All tools implement OWASP Top 10 security protections:
+## What Each Analyzer Detects
 
-- ✅ **Path Traversal Prevention** (Zip/Tar slip attacks blocked)
-- ✅ **Safe File Extraction** with path validation
-- ✅ **Symlink Attack Prevention** in tar files
-- ✅ **Proper Exception Handling**
+### Login Timeline (`linux_login_timeline.py`)
 
-## Tool Details
-
-### linux_login_timeline.py
-
-Parses Linux authentication logs and creates a chronological timeline of:
+Parses authentication logs and creates a chronological timeline:
 - SSH logins (password and key-based)
-- Failed login attempts
+- Failed login attempts with source IPs
 - sudo command execution
 - User account changes
-- Session activity
+- Session activity (wtmp/btmp/lastlog)
+- Bash history with timestamps
 - System boot events
 
-**Input:** UAC tarballs, directories, or live filesystem
-**Output:** CSV timeline sorted by timestamp
+**Sources:** `auth.log`, `secure`, `syslog`, `wtmp`, `btmp`, `lastlog`, `.bash_history`
 
-### linux_binary_analyzer.py
+### Journal Analyzer (`linux_journal_analyzer.py`)
 
-Analyzes Linux systems for suspicious binaries, configurations, and persistence:
+Analyzes systemd journal logs:
+- All journal entries with proper timestamps
+- Security-relevant events filtered separately
+- Service start/stop events
+- Kernel messages
+- Authentication events
 
-**Binary Analysis:**
-- Programs outside standard OS binary directories
-- Hidden executables (in .dot directories)
-- Unexpected SUID/SGID files
-- LD_PRELOAD/LD.so.conf hijacking (rootkit traces)
-- Environment variable analysis
-- Hash matching against known-bad IOCs
+**Sources:** `/var/log/journal/` binary journals
 
-**Persistence Detection (v1.1.0+):**
-- Systemd units (`/etc/systemd/system/`, `/usr/lib/systemd/system/`)
-- Cron jobs (`/etc/crontab`, `/etc/cron.d/`, user crontabs)
-- Init scripts (`/etc/init.d/`, `/etc/rc.local`)
-- Kernel modules (`/etc/modules`, `/etc/modules-load.d/`)
-- Udev rules (`/etc/udev/rules.d/`)
+### Persistence Hunter (`linux_persistence_hunter.py`)
 
-**Input:** UAC tarballs, directories, or live filesystem
-**Output:** Two CSVs: binaries findings + environment findings
+**Extracts ALL scheduled tasks for review** plus detects suspicious persistence:
 
-### linux_persistence_hunter.py
-
-**PANIX-style** persistence detection covering all techniques from [PANIX](https://github.com/Aegrah/PANIX):
-- Cron/At jobs, systemd timers
-- SSH authorized_keys backdoors
-- Backdoor users (UID=0)
-- Systemd/init.d/rc.local persistence
-- Shell profile backdoors (.bashrc, .profile)
-- LD_PRELOAD hijacking
-- PAM backdoors
-- Sudoers modifications
-- SUID/capabilities abuse
-- Udev rules, XDG autostart
-- Web shells
-- Rootkit indicators (LKM, hidden files)
-- Container escape configs
+| Category | What's Checked |
+|----------|----------------|
+| **Cron Jobs** | `/etc/crontab`, `/etc/cron.d/`, `/etc/cron.daily/`, `/var/spool/cron/` |
+| **Systemd** | Services, timers, generators, socket activation |
+| **At Jobs** | `/var/spool/at/` |
+| **SSH** | `authorized_keys`, `sshd_config` (PermitRootLogin, etc.) |
+| **Users** | Backdoor users (UID=0), `/etc/passwd`, `/etc/shadow` |
+| **Shell Profiles** | `.bashrc`, `.profile`, `/etc/profile.d/` |
+| **Init Scripts** | `/etc/init.d/`, `/etc/rc.local` |
+| **LD_PRELOAD** | `/etc/ld.so.preload`, environment hijacking |
+| **PAM** | PAM configuration backdoors |
+| **Sudoers** | NOPASSWD rules, suspicious entries |
+| **Kernel Modules** | `/etc/modprobe.d/`, `/etc/modules-load.d/` |
+| **Dracut** | Initramfs persistence |
+| **Docker** | Bind mounts, privileged containers |
+| **Environment** | `/etc/environment`, `pam_env.conf` |
+| **Code Patterns** | curl/wget/nc/bash -i//dev/tcp patterns |
+| **NPM/Python** | postinstall hooks, setup.py, sitecustomize.py |
+| **Git Hooks** | Active (non-sample) hooks |
+| **IP Connections** | Hardcoded IP:port patterns |
+| **Web Shells** | PHP/JSP/ASP shells |
 
 All findings mapped to **MITRE ATT&CK** technique IDs.
 
-**Input:** UAC tarballs, directories, or live filesystem
-**Output:** CSV with technique, severity, and IOC details
+### Security Analyzer (`linux_security_analyzer.py`)
 
-### uac_extractor.py
+Combined binary and persistence analysis:
+- Programs outside standard directories
+- Hidden executables (in .dot directories)
+- SUID/SGID files and capabilities
+- Rootkit traces
+- Environment variable analysis
+- Hash matching against IOCs
 
-Extracts UAC collection tarballs from:
-- Single ZIP files
-- Nested ZIP archives (any depth)
-- Multiple TAR formats (.tar, .tar.gz, .tgz, .tar.bz2)
+## Workflow Diagram
 
-**Input:** Directory containing ZIP files
-**Output:** Extracted tarballs + mapping CSV
+```
+                    ┌─────────────────────────┐
+                    │   UAC Tarball or        │
+                    │   Extracted Directory   │
+                    └───────────┬─────────────┘
+                                │
+                                ▼
+                    ┌─────────────────────────┐
+                    │   linux_analyzer.py     │
+                    │   (Main Orchestrator)   │
+                    └───────────┬─────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+        ▼                       ▼                       ▼
+┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ Login         │    │ Journal          │    │ Persistence      │
+│ Timeline      │    │ Analyzer         │    │ Hunter           │
+└───────┬───────┘    └────────┬─────────┘    └────────┬─────────┘
+        │                     │                       │
+        ▼                     ▼                       ▼
+┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ _login_       │    │ _journal.csv     │    │ _persistence.csv │
+│ timeline.csv  │    │ _journal_        │    │ (ALL cron/timers │
+│               │    │ security.csv     │    │  + suspicious)   │
+└───────────────┘    └──────────────────┘    └──────────────────┘
+                                │
+                                ▼
+                    ┌──────────────────┐
+                    │ Security         │
+                    │ Analyzer         │
+                    └────────┬─────────┘
+                             │
+                             ▼
+                    ┌──────────────────┐
+                    │ _security_*.csv  │
+                    └──────────────────┘
+```
 
-### ize_sorter.py
+## Examples
 
-Sorts Kaseya IZE and UAC TAR files into folders based on:
-- Hostname matching against CSV mappings
-- Fuzzy matching for partial hostnames
-- Client ID extraction from filenames
-
-**Input:** Directory + hostname mapping CSV
-**Output:** Organized folders + detailed results CSV
-
-## Command Reference
+### Analyze Multiple Systems
 
 ```bash
-# UAC Extractor - Extract tarballs from ZIP archives
-python uac_extractor.py <search_dir> <output_dir> [--dry-run] [--keep-zips] [-v]
-
-# IZE Sorter - Sort files by hostname mapping
-python ize_sorter.py <search_path> <csv_file> <output_dir> [--threshold N] [--dry-run]
-
-# Login Timeline - Create authentication timeline
-python linux_login_timeline.py -s <source> -o <output.csv> [--batch DIR] [--summary]
-
-# Binary Analyzer - Detect suspicious binaries
-python linux_binary_analyzer.py -s <source> -o <output.csv> [--hashes iocs.txt]
-
-# Persistence Hunter - Detect PANIX-style persistence
-python linux_persistence_hunter.py -s <source> -o <output.csv> [-q]
+# Process multiple tarballs
+for tarball in *.tar.gz; do
+    python linux_analyzer.py -s "$tarball" -o ./results/
+done
 ```
 
-## Tips
+### Quick Persistence Check
 
-1. **Always do a dry run first** to preview what will happen
-2. **Use `--verbose` or `--debug`** flags when troubleshooting
-3. **Keep source files** with `--keep-zips` until processing is verified
-4. **Check the mapping/results CSVs** for audit trail
-5. **Lower match threshold** if hostname matching is too strict
-
-## File Structure After Processing
-
+```bash
+# Just check for persistence mechanisms
+python linux_persistence_hunter.py -s evidence.tar.gz -o findings.csv -v
 ```
-C:\Evidence\
-├── ZipArchives\              # Original evidence
-│   ├── case001.zip
-│   └── case002.zip
-│
-├── ExtractedUAC\             # From uac_extractor
-│   ├── server01-C12345-F0001.tar.gz
-│   ├── server02-C12345-F0002.tar.gz
-│   └── uac_mapping_20241217.csv
-│
-├── Sorted\                   # From ize_sorter
-│   ├── Acme_Corp\
-│   │   ├── SERVER-DC01.ize
-│   │   └── SERVER-DC02.ize
-│   ├── Beta_Industries\
-│   │   └── SQL-PROD.tar
-│   ├── ize_sorter_results_20241217.csv
-│   └── ize_sorter_log_20241217.txt
-│
-├── Timelines\                # From linux_login_timeline
-│   ├── server01_timeline.csv
-│   └── server02_timeline.csv
-│
-├── Analysis\                 # From linux_binary_analyzer
-│   ├── server01_binaries.csv
-│   └── server01_environment.csv
-│
-└── Persistence\              # From linux_persistence_hunter
-    ├── server01_persistence.csv
-    └── server02_persistence.csv
+
+### Filter High-Severity Findings
+
+After analysis, filter the CSV for critical/high findings:
+```bash
+# PowerShell
+Import-Csv persistence.csv | Where-Object {$_.Severity -in @('CRITICAL','HIGH')}
+
+# Bash
+grep -E "CRITICAL|HIGH" persistence.csv
 ```
+
+## Timestamp Handling
+
+All timestamps are output in **UTC** for forensic accuracy. A secondary `Timestamp_Local` column shows the analysis machine's local time for reference.
+
+## Security Features
+
+- Path traversal prevention (Zip/Tar slip attacks blocked)
+- Safe file extraction with path validation
+- Symlink attack prevention
+- Proper exception handling
+- No external dependencies (supply chain security)
+
+## Documentation
+
+- [linux_analyzer.py](README_linux_analyzer.md) - Main orchestrator details
+- [linux_login_timeline.py](README_linux_login_timeline.md) - Login timeline details
+- [linux_journal_analyzer.py](README_linux_journal_analyzer.md) - Journal analyzer details
+- [linux_persistence_hunter.py](README_linux_persistence_hunter.md) - Persistence hunter details
 
 ## License
 
-Internal forensics toolkit. Handle all evidence data according to your organization's chain of custody and data handling policies.
-
-## Contributing
-
-When making changes:
-1. Maintain OWASP security compliance
-2. Use only Python standard library
-3. Test with both Windows and Linux paths
-4. Update relevant README files
-
+MIT License. Handle all evidence data according to your organization's chain of custody and data handling policies.
