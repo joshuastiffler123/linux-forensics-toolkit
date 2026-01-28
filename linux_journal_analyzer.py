@@ -220,8 +220,23 @@ class JournalEntry:
         max_len = max_message_length or DEFAULT_MAX_MESSAGE_LENGTH
         cleaned_msg = self.clean_message(self.message)
         
+        # Calculate timestamps - UTC and local
+        # Note: Timestamp is stored in UTC, Timestamp_Local is analysis machine's local time
+        timestamp_utc = ""
+        timestamp_local = ""
+        if self.timestamp:
+            timestamp_utc = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                from datetime import timezone
+                utc_aware = self.timestamp.replace(tzinfo=timezone.utc)
+                local_dt = utc_aware.astimezone()
+                timestamp_local = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                timestamp_local = timestamp_utc
+        
         return {
-            "Timestamp": self.timestamp.strftime("%Y-%m-%d %H:%M:%S") if self.timestamp else "",
+            "Timestamp": timestamp_utc,
+            "Timestamp_Local": timestamp_local,
             "Hostname": self.hostname,
             "Unit": self.unit.split('[')[0] if self.unit else "",  # Remove PID from unit
             "Priority": self.priority_name,  # Use name instead of number for readability
@@ -917,16 +932,16 @@ class JournalParser:
         # Extract timestamp
         timestamp = None
         if '__REALTIME_TIMESTAMP' in obj:
-            # Microseconds since epoch
+            # Microseconds since epoch - use UTC for forensic consistency
             try:
                 ts_us = int(obj['__REALTIME_TIMESTAMP'])
-                timestamp = datetime.fromtimestamp(ts_us / 1000000)
+                timestamp = datetime.utcfromtimestamp(ts_us / 1000000)
             except:
                 pass
         elif '_SOURCE_REALTIME_TIMESTAMP' in obj:
             try:
                 ts_us = int(obj['_SOURCE_REALTIME_TIMESTAMP'])
-                timestamp = datetime.fromtimestamp(ts_us / 1000000)
+                timestamp = datetime.utcfromtimestamp(ts_us / 1000000)
             except:
                 pass
         
@@ -1102,7 +1117,7 @@ class JournalParser:
             if realtime_us == 0 or realtime_us > 2000000000000000:  # Sanity check
                 return None
             
-            timestamp = datetime.fromtimestamp(realtime_us / 1000000)
+            timestamp = datetime.utcfromtimestamp(realtime_us / 1000000)  # UTC for consistency
             boot_id = boot_id_bytes.hex()
             
             # Parse entry items to get field data
@@ -1348,7 +1363,7 @@ class JournalParser:
                                 ts_str = context[ts_start:ts_end].decode('utf-8', errors='replace')
                                 ts_us = int(ts_str)
                                 if 1000000000000 < ts_us < 2000000000000000:
-                                    timestamp = datetime.fromtimestamp(ts_us / 1000000)
+                                    timestamp = datetime.utcfromtimestamp(ts_us / 1000000)
                             except:
                                 pass
                     
@@ -1364,7 +1379,7 @@ class JournalParser:
                                     # Microseconds since epoch, should be between ~2010 and ~2030
                                     # 2010: 1262304000000000, 2030: 1893456000000000
                                     if 1262304000000000 < potential_ts < 1900000000000000:
-                                        timestamp = datetime.fromtimestamp(potential_ts / 1000000)
+                                        timestamp = datetime.utcfromtimestamp(potential_ts / 1000000)
                                         break
                                 except:
                                     pass
@@ -1385,7 +1400,7 @@ class JournalParser:
                                     epoch_sec = int(match.group(1))
                                     # Sanity check: between 2010 and 2030
                                     if 1262304000 < epoch_sec < 1900000000:
-                                        timestamp = datetime.fromtimestamp(epoch_sec)
+                                        timestamp = datetime.utcfromtimestamp(epoch_sec)
                                         break
                                 except:
                                     pass
@@ -1471,9 +1486,9 @@ class JournalParser:
                      'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12}
             month = months.get(month_str, 1)
             
-            # Determine reference date for year inference
+            # Determine reference date for year inference (use UTC)
             if reference_date is None:
-                reference_date = self.reference_date if self.reference_date else datetime.now()
+                reference_date = self.reference_date if self.reference_date else datetime.utcnow()
             
             reference_year = reference_date.year
             
@@ -1666,7 +1681,7 @@ def export_csv(entries: List[JournalEntry], output_path: str, max_message_length
         print(f"{Style.WARNING}No entries to export{Style.RESET}", file=sys.stderr)
         return
     
-    fieldnames = ["Timestamp", "Hostname", "Unit", "Priority", "Category", 
+    fieldnames = ["Timestamp", "Timestamp_Local", "Hostname", "Unit", "Priority", "Category", 
                   "User", "Source_IP", "PID", "UID", "Message", "Source_File"]
     
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
@@ -1794,9 +1809,9 @@ Supported Formats:
         if os.path.isfile(args.source):
             try:
                 mtime = os.path.getmtime(args.source)
-                reference_date = datetime.fromtimestamp(mtime)
+                reference_date = datetime.utcfromtimestamp(mtime)
                 if verbose:
-                    print(f"{Style.INFO}Reference date (from file mtime):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                    print(f"{Style.INFO}Reference date (from file mtime, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
             except (OSError, ValueError):
                 pass
         elif os.path.isdir(args.source):
@@ -1809,9 +1824,9 @@ Supported Formats:
                     log_path = os.path.join(args.source, log_pattern)
                     if os.path.exists(log_path):
                         mtime = os.path.getmtime(log_path)
-                        reference_date = datetime.fromtimestamp(mtime)
+                        reference_date = datetime.utcfromtimestamp(mtime)
                         if verbose:
-                            print(f"{Style.INFO}Reference date (from {log_pattern}):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                            print(f"{Style.INFO}Reference date (from {log_pattern}, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
                         break
                 
                 # If not found, search recursively for var/log
@@ -1826,7 +1841,7 @@ Supported Formats:
                                     log_path = os.path.join(var_log, log_name)
                                     if os.path.exists(log_path):
                                         mtime = os.path.getmtime(log_path)
-                                        reference_date = datetime.fromtimestamp(mtime)
+                                        reference_date = datetime.utcfromtimestamp(mtime)
                                         rel_path = os.path.relpath(log_path, args.source)
                                         if verbose:
                                             print(f"{Style.INFO}Reference date (from {rel_path}):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
@@ -1839,9 +1854,9 @@ Supported Formats:
                 pass
         
         if reference_date is None:
-            reference_date = datetime.now()
+            reference_date = datetime.utcnow()
             if verbose:
-                print(f"{Style.WARNING}Reference date (using current - may be inaccurate):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                print(f"{Style.WARNING}Reference date (using current UTC - may be inaccurate):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
         
         parser_obj = JournalParser(handler, reference_date=reference_date)
         entries = parser_obj.parse_all()

@@ -29,6 +29,19 @@ Detects:
 - Bind/Reverse shells
 - Systemd socket activation
 
+Extended Checks (NEW):
+- SSHD config analysis (PermitRootLogin, AuthorizedKeysFile, etc.)
+- Environment persistence (/etc/environment, pam_env.conf, pam_env.d)
+- Docker persistence (bind mounts, privileged containers)
+- Kernel module configs (modprobe.d, modules-load.d)
+- Dracut modules (initramfs persistence)
+- Sketchy code patterns (curl, wget, nc, bash -i, /dev/tcp)
+- NPM package backdoors (postinstall hooks)
+- Python backdoors (setup.py, sitecustomize.py)
+- Makefile backdoors (curl/wget/bash in make recipes)
+- IP connection patterns (hardcoded IP:port)
+- Active git hooks (non-sample hooks)
+
 Author: Security Tools
 Version: 1.1.0
 License: MIT
@@ -210,6 +223,19 @@ MITRE_MAPPINGS = {
     "system_binary": ("Compromise Host Software Binary", "T1554"),
     "malicious_container": ("Escape to Host", "T1610"),
     "message_queue": ("Inter-Process Communication", "T1559"),
+    
+    # New checks
+    "sshd_config": ("Remote Services: SSH", "T1021.004"),
+    "environment_persistence": ("Event Triggered Execution: Unix Shell Configuration", "T1546.004"),
+    "docker_persistence": ("Container Administration Command", "T1609"),
+    "modprobe": ("Boot or Logon Autostart Execution: Kernel Modules", "T1547.006"),
+    "dracut": ("Pre-OS Boot", "T1542"),
+    "sketchy_code": ("Command and Scripting Interpreter", "T1059"),
+    "npm_backdoor": ("Supply Chain Compromise: Compromise Software Dependencies", "T1195.001"),
+    "python_backdoor": ("Supply Chain Compromise: Compromise Software Dependencies", "T1195.001"),
+    "makefile_backdoor": ("Supply Chain Compromise", "T1195"),
+    "ip_connection": ("Network Service Discovery", "T1046"),
+    "git_hook_active": ("Event Triggered Execution", "T1546"),
 }
 
 
@@ -442,6 +468,156 @@ SUDOERS_BACKDOOR_PATTERNS = [
     (r'NOPASSWD:\s*/usr/bin/(python|perl|ruby)', "NOPASSWD interpreter"),
     (r'!authenticate', "Sudo no authentication"),
     (r'!requiretty', "Sudo no tty required"),
+]
+
+# ============================================================================
+# NEW: Sketchy Code Detection Patterns
+# ============================================================================
+
+# Network/download/exec patterns - for scanning arbitrary code files
+SKETCHY_CODE_PATTERNS = [
+    # Network tools
+    (r'\bcurl\b.*\|', "Curl piped to another command"),
+    (r'\bwget\b.*\|', "Wget piped to another command"),
+    (r'\bcurl\b.*-[sS]', "Curl silent mode"),
+    (r'\bwget\b.*-q', "Wget quiet mode"),
+    (r'\bnc\s+-', "Netcat with flags"),
+    (r'\bncat\b', "Ncat usage"),
+    (r'\bsocat\b', "Socat usage"),
+    
+    # Shell invocations
+    (r'bash\s+-i', "Bash interactive mode"),
+    (r'bash\s+-c\s+["\']', "Bash -c execution"),
+    (r'/dev/tcp/', "/dev/tcp network redirection"),
+    (r'/dev/udp/', "/dev/udp network redirection"),
+    (r'exec\s+\d+<>/dev/tcp', "Bash TCP exec redirection"),
+    
+    # Socket/connection patterns
+    (r'\bsocket\.connect\b', "Socket connect call"),
+    (r'\bsocket\.socket\b', "Socket creation"),
+    (r'\.connect\s*\(\s*\(', "Connect method call"),
+    
+    # HTTP methods in scripts
+    (r'\bfetch\s*\(', "Fetch API call"),
+    (r'\.post\s*\(', "HTTP POST method"),
+    (r'requests\.(get|post|put)', "Python requests library"),
+    (r'urllib\.request', "Python urllib request"),
+    
+    # Obfuscation
+    (r'\bbase64\b', "Base64 encoding/decoding"),
+    (r'\beval\b\s*\(', "Eval function call"),
+    (r'\bobfusc', "Obfuscation reference"),
+    (r'\.decode\s*\(', "Decode method call"),
+    (r'\bexec\s*\(', "Exec function call"),
+]
+
+# Persistence-related patterns in code
+PERSISTENCE_CODE_PATTERNS = [
+    (r'\bcron\b', "Cron reference"),
+    (r'\bsystemd\b', "Systemd reference"),
+    (r'\bservice\b.*\b(start|enable|restart)\b', "Service manipulation"),
+    (r'ExecStart\s*=', "ExecStart directive"),
+    (r'rc\.local', "rc.local reference"),
+    (r'\bLD_PRELOAD\b', "LD_PRELOAD reference"),
+    (r'ssh-rsa\b', "SSH public key"),
+    (r'authorized_keys', "Authorized keys reference"),
+    (r'\.bashrc\b', "bashrc reference"),
+    (r'\.profile\b', "profile reference"),
+]
+
+# IP address and connection patterns
+IP_CONNECTION_PATTERNS = [
+    (r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+', "IP:port pattern"),
+    (r'/dev/tcp/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', "/dev/tcp with IP"),
+    (r'connect\s*\(\s*["\']?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', "Connect to IP"),
+]
+
+# Reverse shell patterns (expanded)
+REVERSE_SHELL_PATTERNS = [
+    (r'bash\s+-i\s+>&', "Bash -i redirect"),
+    (r'/dev/tcp/\S+/\d+', "/dev/tcp connection"),
+    (r'nc\s+\S+\s+\d+\s+-e', "Netcat -e reverse shell"),
+    (r'nc\s+-e\s+/bin/', "Netcat execute shell"),
+    (r'\bsocat\b.*EXEC', "Socat EXEC"),
+    (r'python\s+-c\s+[\'"]import\s+(socket|os)', "Python inline socket/os import"),
+    (r'perl\s+-e\s+.*socket', "Perl inline socket"),
+    (r'ruby\s+-rsocket', "Ruby socket require"),
+    (r'php\s+-r\s+.*fsockopen', "PHP inline fsockopen"),
+    (r'mkfifo.*nc\s+', "Named pipe netcat"),
+    (r'telnet\s+\S+\s+\d+\s*\|', "Telnet piped"),
+]
+
+# NPM backdoor patterns
+NPM_BACKDOOR_PATTERNS = [
+    (r'"preinstall"\s*:', "NPM preinstall script"),
+    (r'"postinstall"\s*:', "NPM postinstall script"),
+    (r'"install"\s*:\s*"[^"]*curl', "NPM install with curl"),
+    (r'"install"\s*:\s*"[^"]*wget', "NPM install with wget"),
+    (r'"install"\s*:\s*"[^"]*bash', "NPM install with bash"),
+    (r'"scripts"\s*:.*"[^"]*>/dev/null', "NPM script output suppression"),
+]
+
+# Python backdoor patterns
+PYTHON_BACKDOOR_PATTERNS = [
+    (r'setup\s*\(', "Python setup.py function"),
+    (r'cmdclass\s*=', "Python setup cmdclass hook"),
+    (r'from\s+setuptools\s+import', "Setuptools import"),
+    (r'sitecustomize', "Python sitecustomize hook"),
+    (r'usercustomize', "Python usercustomize hook"),
+    (r'__import__\s*\(\s*["\']', "Dynamic import"),
+    (r'importlib\.import_module', "Dynamic module import"),
+]
+
+# Makefile backdoor patterns
+MAKEFILE_BACKDOOR_PATTERNS = [
+    (r'^\s*\$\(shell.*curl', "Makefile shell curl"),
+    (r'^\s*\$\(shell.*wget', "Makefile shell wget"),
+    (r'^\s*\$\(shell.*bash\s+-', "Makefile shell bash"),
+    (r'^\s*\$\(shell.*python', "Makefile shell python"),
+    (r'^\s*\$\(shell.*nc\s+-', "Makefile shell netcat"),
+    (r'@curl\b', "Makefile curl command"),
+    (r'@wget\b', "Makefile wget command"),
+    (r'`curl\b', "Makefile backtick curl"),
+    (r'`wget\b', "Makefile backtick wget"),
+]
+
+# SSHD config security patterns
+SSHD_CONFIG_PATTERNS = [
+    (r'PermitRootLogin\s+(yes|without-password|prohibit-password)', "Root login enabled"),
+    (r'PasswordAuthentication\s+yes', "Password auth enabled"),
+    (r'PermitEmptyPasswords\s+yes', "Empty passwords allowed"),
+    (r'AuthorizedKeysFile\s+(?!.*\.ssh/authorized_keys)', "Non-standard authorized_keys location"),
+    (r'AuthorizedKeysCommand\s+', "AuthorizedKeysCommand configured"),
+    (r'ForceCommand\s+', "ForceCommand configured"),
+    (r'PermitTunnel\s+yes', "Tunneling enabled"),
+    (r'GatewayPorts\s+yes', "Gateway ports enabled"),
+    (r'AllowTcpForwarding\s+yes', "TCP forwarding enabled"),
+    (r'X11Forwarding\s+yes', "X11 forwarding enabled"),
+]
+
+# Docker/container persistence patterns
+DOCKER_PERSISTENCE_PATTERNS = [
+    (r'"Binds"\s*:\s*\[.*:/host', "Docker bind mount to host"),
+    (r'"Binds"\s*:\s*\[.*/etc', "Docker bind mount to /etc"),
+    (r'"Binds"\s*:\s*\[.*/root', "Docker bind mount to /root"),
+    (r'"Binds"\s*:\s*\[.*/var/run/docker', "Docker socket mount"),
+    (r'"Privileged"\s*:\s*true', "Privileged container"),
+    (r'"HostConfig".*"Privileged"', "Privileged host config"),
+    (r'--privileged', "Privileged flag"),
+    (r'-v\s+/:/host', "Root filesystem mount"),
+    (r'docker\.sock', "Docker socket reference"),
+]
+
+# Environment persistence patterns
+ENVIRONMENT_PERSISTENCE_PATTERNS = [
+    (r'^[A-Z_]+=.*\|', "Environment var with pipe"),
+    (r'^[A-Z_]+=.*\$\(', "Environment var with command substitution"),
+    (r'^[A-Z_]+=.*`', "Environment var with backticks"),
+    (r'LD_PRELOAD\s*=', "LD_PRELOAD in environment"),
+    (r'LD_LIBRARY_PATH\s*=.*/tmp', "LD_LIBRARY_PATH pointing to /tmp"),
+    (r'LD_LIBRARY_PATH\s*=.*/dev/shm', "LD_LIBRARY_PATH pointing to /dev/shm"),
+    (r'PATH\s*=.*/tmp', "PATH containing /tmp"),
+    (r'PATH\s*=.*/dev/shm', "PATH containing /dev/shm"),
 ]
 
 
@@ -708,6 +884,18 @@ class PersistenceHunter:
             ("Message Queues", self._check_message_queues),
             ("eBPF Programs", self._check_ebpf),
             ("Dynamic Linker Cache", self._check_ld_cache),
+            # NEW: Extended detection checks
+            ("SSHD Config", self._check_sshd_config),
+            ("Environment Persistence", self._check_environment_persistence),
+            ("Docker Persistence", self._check_docker_persistence),
+            ("Modprobe/Kernel Modules Config", self._check_modprobe_modules),
+            ("Dracut Modules", self._check_dracut),
+            ("Sketchy Code Patterns", self._check_sketchy_code),
+            ("NPM Package Backdoors", self._check_npm_backdoors),
+            ("Python Backdoors", self._check_python_backdoors),
+            ("Makefile Backdoors", self._check_makefiles),
+            ("IP Connection Patterns", self._check_ip_connections),
+            ("Active Git Hooks", self._check_git_hooks_active),
         ]
         
         for i, (name, check_func) in enumerate(checks, 1):
@@ -770,7 +958,7 @@ class PersistenceHunter:
     # ========================================================================
     
     def _check_cron(self) -> int:
-        """Check cron configurations for backdoors."""
+        """Check cron configurations - extracts ALL cron entries for review."""
         count = 0
         
         cron_paths = [
@@ -797,10 +985,57 @@ class PersistenceHunter:
                 except Exception:
                     continue
                 
-                # Check for suspicious patterns
-                count += self._check_content_patterns(filepath, content, 
-                                                       CRON_SUSPICIOUS_PATTERNS + SHELL_BACKDOOR_PATTERNS, 
-                                                       "cron")
+                # Extract ALL cron entries for review
+                for line_num, line in enumerate(content.split('\n'), 1):
+                    line_stripped = line.strip()
+                    
+                    # Skip empty lines and comments
+                    if not line_stripped or line_stripped.startswith('#'):
+                        continue
+                    
+                    # Skip variable assignments that aren't commands
+                    if '=' in line_stripped and not any(c in line_stripped for c in ['*', '/', '@']):
+                        # But still log environment variables for context
+                        if any(v in line_stripped.upper() for v in ['PATH=', 'SHELL=', 'MAILTO=']):
+                            continue
+                    
+                    # Determine severity based on patterns
+                    severity = "INFO"  # Default: just for review
+                    description = "Cron entry"
+                    
+                    # Check for suspicious patterns to elevate severity
+                    for pattern, desc in CRON_SUSPICIOUS_PATTERNS + SHELL_BACKDOOR_PATTERNS:
+                        if re.search(pattern, line_stripped, re.IGNORECASE):
+                            severity = "HIGH"
+                            description = f"Suspicious cron: {desc}"
+                            break
+                    
+                    # Determine cron type from path
+                    if 'cron.daily' in filepath:
+                        description = f"Daily cron: {description}" if severity != "INFO" else "Daily cron job"
+                    elif 'cron.hourly' in filepath:
+                        description = f"Hourly cron: {description}" if severity != "INFO" else "Hourly cron job"
+                    elif 'cron.weekly' in filepath:
+                        description = f"Weekly cron: {description}" if severity != "INFO" else "Weekly cron job"
+                    elif 'cron.monthly' in filepath:
+                        description = f"Monthly cron: {description}" if severity != "INFO" else "Monthly cron job"
+                    elif 'var/spool/cron' in filepath:
+                        description = f"User cron: {description}" if severity != "INFO" else "User crontab entry"
+                    elif 'cron.d' in filepath:
+                        description = f"System cron.d: {description}" if severity != "INFO" else "System cron.d entry"
+                    elif 'crontab' in filepath:
+                        description = f"System crontab: {description}" if severity != "INFO" else "System crontab entry"
+                    
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key="cron",
+                        severity=severity,
+                        description=description,
+                        indicator=line_stripped[:200],
+                        line_number=line_num,
+                        raw_content=line[:500]
+                    )
+                    count += 1
         
         return count
     
@@ -809,7 +1044,7 @@ class PersistenceHunter:
     # ========================================================================
     
     def _check_at_jobs(self) -> int:
-        """Check at jobs for backdoors."""
+        """Check at jobs - extracts ALL at jobs for review."""
         count = 0
         
         at_paths = ["var/spool/at/", "var/spool/atjobs/"]
@@ -826,9 +1061,31 @@ class PersistenceHunter:
                 except Exception:
                     continue
                 
-                count += self._check_content_patterns(filepath, content,
-                                                       SHELL_BACKDOOR_PATTERNS,
-                                                       "at_job")
+                # Log the at job file itself
+                self._add_finding(
+                    filepath=filepath,
+                    technique_key="at_job",
+                    severity="INFO",
+                    description="At job file found",
+                    indicator=os.path.basename(filepath),
+                    raw_content=content[:1000]
+                )
+                count += 1
+                
+                # Also check for suspicious patterns and elevate severity
+                for line_num, line in enumerate(content.split('\n'), 1):
+                    for pattern, desc in SHELL_BACKDOOR_PATTERNS:
+                        if re.search(pattern, line, re.IGNORECASE):
+                            self._add_finding(
+                                filepath=filepath,
+                                technique_key="at_job",
+                                severity="HIGH",
+                                description=f"Suspicious at job: {desc}",
+                                indicator=line[:200].strip(),
+                                line_number=line_num,
+                                raw_content=line[:500]
+                            )
+                            count += 1
         
         return count
     
@@ -837,7 +1094,7 @@ class PersistenceHunter:
     # ========================================================================
     
     def _check_systemd_timers(self) -> int:
-        """Check systemd timers for persistence."""
+        """Check systemd timers - extracts ALL timers for review."""
         count = 0
         
         timer_paths = [
@@ -861,15 +1118,62 @@ class PersistenceHunter:
                 except Exception:
                     continue
                 
+                # Extract timer schedule info
+                on_calendar = ""
+                on_boot = ""
+                description_line = ""
+                for line in content.split('\n'):
+                    if line.strip().startswith('OnCalendar='):
+                        on_calendar = line.strip()
+                    elif line.strip().startswith('OnBootSec=') or line.strip().startswith('OnUnitActiveSec='):
+                        on_boot = line.strip()
+                    elif line.strip().startswith('Description='):
+                        description_line = line.strip()
+                
+                schedule_info = on_calendar or on_boot or "Schedule not found"
+                
+                # Log the timer
+                self._add_finding(
+                    filepath=filepath,
+                    technique_key="timer",
+                    severity="INFO",
+                    description=f"Systemd timer: {description_line}" if description_line else "Systemd timer",
+                    indicator=schedule_info,
+                    raw_content=content[:1000]
+                )
+                count += 1
+                
                 # Check associated service file
                 service_path = filepath.replace('.timer', '.service')
                 service_data = self.handler.get_file(service_path)
                 if service_data:
                     try:
                         service_content = service_data.decode('utf-8', errors='replace')
-                        count += self._check_content_patterns(service_path, service_content,
-                                                               SHELL_BACKDOOR_PATTERNS,
-                                                               "timer")
+                        
+                        # Extract ExecStart for review
+                        for line_num, line in enumerate(service_content.split('\n'), 1):
+                            if line.strip().startswith('ExecStart='):
+                                exec_cmd = line.strip()
+                                
+                                # Check for suspicious patterns
+                                severity = "INFO"
+                                desc = "Timer service ExecStart"
+                                for pattern, pattern_desc in SHELL_BACKDOOR_PATTERNS + SYSTEMD_SUSPICIOUS_PATTERNS:
+                                    if re.search(pattern, exec_cmd, re.IGNORECASE):
+                                        severity = "HIGH"
+                                        desc = f"Suspicious timer service: {pattern_desc}"
+                                        break
+                                
+                                self._add_finding(
+                                    filepath=service_path,
+                                    technique_key="timer",
+                                    severity=severity,
+                                    description=desc,
+                                    indicator=exec_cmd[:200],
+                                    line_number=line_num,
+                                    raw_content=line[:500]
+                                )
+                                count += 1
                     except Exception:
                         pass
         
@@ -1041,7 +1345,7 @@ class PersistenceHunter:
     # ========================================================================
     
     def _check_systemd_services(self) -> int:
-        """Check systemd services for persistence."""
+        """Check systemd services - extracts ALL services for review."""
         count = 0
         
         systemd_paths = [
@@ -1066,30 +1370,62 @@ class PersistenceHunter:
                 except Exception:
                     continue
                 
-                # Check ExecStart for suspicious commands
+                # Extract service info
+                description_line = ""
+                exec_start = ""
+                wanted_by = ""
+                
+                for line in content.split('\n'):
+                    line_stripped = line.strip()
+                    if line_stripped.startswith('Description='):
+                        description_line = line_stripped.split('=', 1)[1] if '=' in line_stripped else ""
+                    elif line_stripped.startswith('ExecStart='):
+                        exec_start = line_stripped.split('=', 1)[1] if '=' in line_stripped else ""
+                    elif line_stripped.startswith('WantedBy='):
+                        wanted_by = line_stripped.split('=', 1)[1] if '=' in line_stripped else ""
+                
+                # Log all ExecStart entries for review
                 for line_num, line in enumerate(content.split('\n'), 1):
-                    line = line.strip()
+                    line_stripped = line.strip()
                     
-                    if line.startswith('ExecStart=') or line.startswith('ExecStartPre=') or line.startswith('ExecStartPost='):
-                        cmd = line.split('=', 1)[1] if '=' in line else ""
+                    if line_stripped.startswith('ExecStart=') or line_stripped.startswith('ExecStartPre=') or line_stripped.startswith('ExecStartPost='):
+                        cmd = line_stripped.split('=', 1)[1] if '=' in line_stripped else ""
+                        
+                        # Determine severity
+                        severity = "INFO"
+                        desc = f"Service: {description_line}" if description_line else "Systemd service"
                         
                         # Check for suspicious paths
-                        if any(p in cmd for p in ['/tmp/', '/var/tmp/', '/dev/shm/', '/home/']):
-                            self._add_finding(
-                                filepath=filepath,
-                                technique_key="systemd",
-                                severity="HIGH",
-                                description="Systemd service executing from suspicious path",
-                                indicator=cmd[:100],
-                                line_number=line_num,
-                                raw_content=line
-                            )
-                            count += 1
+                        if any(p in cmd for p in ['/tmp/', '/var/tmp/', '/dev/shm/']):
+                            severity = "HIGH"
+                            desc = f"Suspicious path in service: {description_line}" if description_line else "Service from suspicious path"
                         
-                        # Check for reverse shells
-                        count += self._check_content_patterns(filepath, line,
-                                                               SHELL_BACKDOOR_PATTERNS,
-                                                               "systemd")
+                        # Check for suspicious patterns
+                        for pattern, pattern_desc in SHELL_BACKDOOR_PATTERNS + SYSTEMD_SUSPICIOUS_PATTERNS:
+                            if re.search(pattern, line_stripped, re.IGNORECASE):
+                                severity = "HIGH"
+                                desc = f"Suspicious service: {pattern_desc}"
+                                break
+                        
+                        # Categorize by location
+                        if 'etc/systemd/system' in filepath:
+                            location = "Custom (etc/systemd/system)"
+                        elif 'etc/systemd/user' in filepath:
+                            location = "User service"
+                        else:
+                            location = "System default"
+                        
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="systemd",
+                            severity=severity,
+                            description=f"{desc} [{location}]",
+                            indicator=cmd[:200],
+                            line_number=line_num,
+                            raw_content=line[:500],
+                            extra_info={"wanted_by": wanted_by}
+                        )
+                        count += 1
         
         return count
     
@@ -2293,6 +2629,737 @@ class PersistenceHunter:
         return count
     
     # ========================================================================
+    # NEW: SSHD Config Analysis
+    # ========================================================================
+    
+    def _check_sshd_config(self) -> int:
+        """
+        Check SSHD configuration for security issues.
+        
+        Looks for risky settings like PermitRootLogin, PasswordAuthentication,
+        non-standard AuthorizedKeysFile locations, etc.
+        """
+        count = 0
+        
+        sshd_config_paths = [
+            "etc/ssh/sshd_config",
+            "etc/ssh/sshd_config.d/",
+        ]
+        
+        for config_path in sshd_config_paths:
+            if config_path.endswith('/'):
+                files = self.handler.list_directory(config_path)
+            else:
+                files = [config_path]
+            
+            for filepath in files:
+                data = self.handler.get_file(filepath)
+                if not data:
+                    continue
+                
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                except Exception:
+                    continue
+                
+                for line_num, line in enumerate(content.split('\n'), 1):
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith('#'):
+                        continue
+                    
+                    for pattern, description in SSHD_CONFIG_PATTERNS:
+                        if re.search(pattern, line_stripped, re.IGNORECASE):
+                            severity = "HIGH" if "Root" in description or "Empty" in description else "MEDIUM"
+                            self._add_finding(
+                                filepath=filepath,
+                                technique_key="sshd_config",
+                                severity=severity,
+                                description=description,
+                                indicator=line_stripped,
+                                line_number=line_num,
+                                raw_content=line[:200]
+                            )
+                            count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Environment Persistence
+    # ========================================================================
+    
+    def _check_environment_persistence(self) -> int:
+        """
+        Check environment files for persistence mechanisms.
+        
+        Checks:
+        - /etc/environment
+        - /etc/security/pam_env.conf
+        - /etc/security/pam_env.d/
+        - LD_PRELOAD in /etc and /home
+        """
+        count = 0
+        
+        env_files = [
+            "etc/environment",
+            "etc/security/pam_env.conf",
+        ]
+        
+        # Add pam_env.d files
+        env_files.extend(self.handler.list_directory("etc/security/pam_env.d/"))
+        
+        for filepath in env_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#'):
+                    continue
+                
+                for pattern, description in ENVIRONMENT_PERSISTENCE_PATTERNS:
+                    if re.search(pattern, line_stripped, re.IGNORECASE):
+                        severity = "HIGH" if "LD_PRELOAD" in description else "MEDIUM"
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="environment_persistence",
+                            severity=severity,
+                            description=description,
+                            indicator=line_stripped[:100],
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        # Search for LD_PRELOAD in etc and home directories
+        search_patterns = [r'etc/.*', r'home/.*']
+        files = self.handler.find_files(search_patterns)
+        
+        for filepath, member in files:
+            # Skip binary files and large files
+            if hasattr(member, 'size') and member.size > 1024 * 1024:  # 1MB limit
+                continue
+            
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            # Search for LD_PRELOAD
+            for line_num, line in enumerate(content.split('\n'), 1):
+                if 'LD_PRELOAD' in line:
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key="ld_preload",
+                        severity="HIGH",
+                        description="LD_PRELOAD reference found",
+                        indicator=line[:100].strip(),
+                        line_number=line_num,
+                        raw_content=line[:200]
+                    )
+                    count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Docker Persistence
+    # ========================================================================
+    
+    def _check_docker_persistence(self) -> int:
+        """
+        Check Docker configurations for persistence mechanisms.
+        
+        Looks for:
+        - Suspicious bind mounts in /var/lib/docker/
+        - Privileged container configs
+        - Docker socket mounts
+        """
+        count = 0
+        
+        docker_paths = [
+            "var/lib/docker/",
+            "etc/docker/",
+        ]
+        
+        # Find all files in docker directories
+        docker_files = []
+        for docker_path in docker_paths:
+            docker_files.extend(self.handler.list_directory(docker_path))
+        
+        # Also search for docker-related config files
+        docker_config_patterns = [r'docker.*\.json$', r'Dockerfile', r'docker-compose']
+        config_files = self.handler.find_files(docker_config_patterns)
+        
+        for filepath, member in config_files:
+            docker_files.append(filepath)
+        
+        for filepath in docker_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in DOCKER_PERSISTENCE_PATTERNS:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        severity = "CRITICAL" if "Privileged" in description or "socket" in description else "HIGH"
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="docker_persistence",
+                            severity=severity,
+                            description=description,
+                            indicator=line[:100].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Modprobe and Kernel Modules Configuration
+    # ========================================================================
+    
+    def _check_modprobe_modules(self) -> int:
+        """
+        Check kernel module loading configurations.
+        
+        Checks:
+        - /etc/modprobe.d/
+        - /etc/modules-load.d/
+        - /etc/modules
+        """
+        count = 0
+        
+        module_paths = [
+            "etc/modprobe.d/",
+            "etc/modules-load.d/",
+            "etc/modules",
+        ]
+        
+        # Known suspicious modules
+        suspicious_modules = [
+            'diamorphine', 'reptile', 'jynx', 'azazel', 'suterusu',
+            'adore', 'phalanx', 'brootus', 'bdvl', 'beurk', 'knark',
+            'modhide', 'enyelkm', 'override'
+        ]
+        
+        # Suspicious modprobe options
+        suspicious_options = [
+            (r'install\s+\S+\s+/bin/', "Module install script with /bin/"),
+            (r'install\s+\S+\s+.*curl', "Module install with curl"),
+            (r'install\s+\S+\s+.*wget', "Module install with wget"),
+            (r'install\s+\S+\s+.*bash', "Module install with bash"),
+            (r'install\s+\S+\s+.*python', "Module install with python"),
+            (r'softdep\s+\S+\s+pre:', "Module soft dependency (pre)"),
+        ]
+        
+        for module_path in module_paths:
+            if module_path.endswith('/'):
+                files = self.handler.list_directory(module_path)
+            else:
+                files = [module_path]
+            
+            for filepath in files:
+                data = self.handler.get_file(filepath)
+                if not data:
+                    continue
+                
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                except Exception:
+                    continue
+                
+                for line_num, line in enumerate(content.split('\n'), 1):
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith('#'):
+                        continue
+                    
+                    # Check for suspicious modules
+                    for susp_mod in suspicious_modules:
+                        if susp_mod in line_stripped.lower():
+                            self._add_finding(
+                                filepath=filepath,
+                                technique_key="modprobe",
+                                severity="CRITICAL",
+                                description=f"Suspicious kernel module: {susp_mod}",
+                                indicator=line_stripped[:100],
+                                line_number=line_num,
+                                raw_content=line[:200]
+                            )
+                            count += 1
+                    
+                    # Check for suspicious options
+                    for pattern, description in suspicious_options:
+                        if re.search(pattern, line_stripped, re.IGNORECASE):
+                            self._add_finding(
+                                filepath=filepath,
+                                technique_key="modprobe",
+                                severity="HIGH",
+                                description=description,
+                                indicator=line_stripped[:100],
+                                line_number=line_num,
+                                raw_content=line[:200]
+                            )
+                            count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Dracut Persistence
+    # ========================================================================
+    
+    def _check_dracut(self) -> int:
+        """
+        Check Dracut modules for persistence.
+        
+        Checks:
+        - /usr/lib/dracut/modules.d/
+        - /lib/dracut/modules.d/
+        """
+        count = 0
+        
+        dracut_paths = [
+            "usr/lib/dracut/modules.d/",
+            "lib/dracut/modules.d/",
+            "etc/dracut.conf.d/",
+        ]
+        
+        suspicious_patterns = [
+            (r'curl\s+', "Curl in dracut module"),
+            (r'wget\s+', "Wget in dracut module"),
+            (r'nc\s+-', "Netcat in dracut module"),
+            (r'/dev/tcp/', "/dev/tcp in dracut module"),
+            (r'base64.*\|', "Base64 pipe in dracut module"),
+            (r'bash\s+-i', "Interactive bash in dracut module"),
+            (r'python.*-c', "Python -c in dracut module"),
+        ]
+        
+        for dracut_path in dracut_paths:
+            files = self.handler.list_directory(dracut_path)
+            
+            for filepath in files:
+                data = self.handler.get_file(filepath)
+                if not data:
+                    continue
+                
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                except Exception:
+                    continue
+                
+                # Report existence of custom dracut modules (could be legitimate)
+                if 'module-setup.sh' in filepath:
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key="dracut",
+                        severity="INFO",
+                        description="Custom dracut module found",
+                        indicator=os.path.basename(os.path.dirname(filepath))
+                    )
+                    count += 1
+                
+                # Check for suspicious content
+                for line_num, line in enumerate(content.split('\n'), 1):
+                    for pattern, description in suspicious_patterns:
+                        if re.search(pattern, line, re.IGNORECASE):
+                            self._add_finding(
+                                filepath=filepath,
+                                technique_key="dracut",
+                                severity="HIGH",
+                                description=description,
+                                indicator=line[:100].strip(),
+                                line_number=line_num,
+                                raw_content=line[:200]
+                            )
+                            count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Sketchy Code Detection
+    # ========================================================================
+    
+    def _check_sketchy_code(self) -> int:
+        """
+        Scan for sketchy/suspicious code patterns across all files.
+        
+        Looks for network tools, shell invocations, obfuscation, etc.
+        """
+        count = 0
+        
+        # File extensions to scan
+        code_patterns = [
+            r'\.sh$', r'\.bash$', r'\.py$', r'\.pl$', r'\.rb$',
+            r'\.php$', r'\.js$', r'\.ts$', r'\.go$', r'\.c$', r'\.h$',
+            r'Makefile$', r'\.mk$', r'\.yml$', r'\.yaml$', r'\.conf$',
+        ]
+        
+        files = self.handler.find_files(code_patterns)
+        
+        all_patterns = SKETCHY_CODE_PATTERNS + REVERSE_SHELL_PATTERNS
+        
+        for filepath, member in files:
+            # Skip large files
+            if hasattr(member, 'size') and member.size > 500 * 1024:  # 500KB limit
+                continue
+            
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in all_patterns:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        # Determine severity based on pattern type
+                        if any(x in description.lower() for x in ['reverse', 'shell', 'netcat', '/dev/tcp']):
+                            severity = "CRITICAL"
+                        elif any(x in description.lower() for x in ['curl', 'wget', 'base64', 'eval']):
+                            severity = "HIGH"
+                        else:
+                            severity = "MEDIUM"
+                        
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="sketchy_code",
+                            severity=severity,
+                            description=description,
+                            indicator=line[:100].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+                        break  # One finding per line max
+        
+        return count
+    
+    # ========================================================================
+    # NEW: NPM Backdoors
+    # ========================================================================
+    
+    def _check_npm_backdoors(self) -> int:
+        """
+        Check NPM package.json files for backdoor patterns.
+        
+        Looks for suspicious postinstall/preinstall scripts.
+        """
+        count = 0
+        
+        package_files = self.handler.find_files([r'package\.json$'])
+        
+        for filepath, member in package_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in NPM_BACKDOOR_PATTERNS:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        # postinstall itself is INFO, but with suspicious commands is HIGH
+                        if any(x in line.lower() for x in ['curl', 'wget', 'bash', 'sh ', 'nc ', 'python']):
+                            severity = "HIGH"
+                        elif 'postinstall' in line or 'preinstall' in line:
+                            severity = "MEDIUM"
+                        else:
+                            severity = "LOW"
+                        
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="npm_backdoor",
+                            severity=severity,
+                            description=description,
+                            indicator=line[:100].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Python Backdoors
+    # ========================================================================
+    
+    def _check_python_backdoors(self) -> int:
+        """
+        Check Python files for backdoor patterns.
+        
+        Looks for:
+        - setup.py with suspicious hooks
+        - sitecustomize.py / usercustomize.py
+        - urllib/requests/socket usage in unexpected places
+        """
+        count = 0
+        
+        # Check setup.py files
+        setup_files = self.handler.find_files([r'setup\.py$'])
+        
+        for filepath, member in setup_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            # Check for suspicious patterns
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in PYTHON_BACKDOOR_PATTERNS:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        # cmdclass is more suspicious
+                        severity = "MEDIUM" if 'cmdclass' in line.lower() else "LOW"
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="python_backdoor",
+                            severity=severity,
+                            description=description,
+                            indicator=line[:100].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        # Check for sitecustomize.py and usercustomize.py
+        site_patterns = [r'sitecustomize\.py$', r'usercustomize\.py$']
+        site_files = self.handler.find_files(site_patterns)
+        
+        for filepath, member in site_files:
+            self._add_finding(
+                filepath=filepath,
+                technique_key="python_backdoor",
+                severity="HIGH",
+                description="Python site customization file found",
+                indicator=os.path.basename(filepath)
+            )
+            count += 1
+            
+            # Check content for suspicious patterns
+            data = self.handler.get_file(filepath)
+            if data:
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                    for line_num, line in enumerate(content.split('\n'), 1):
+                        for pattern, description in SKETCHY_CODE_PATTERNS:
+                            if re.search(pattern, line, re.IGNORECASE):
+                                self._add_finding(
+                                    filepath=filepath,
+                                    technique_key="python_backdoor",
+                                    severity="CRITICAL",
+                                    description=f"Site customize with: {description}",
+                                    indicator=line[:100].strip(),
+                                    line_number=line_num,
+                                    raw_content=line[:200]
+                                )
+                                count += 1
+                except Exception:
+                    pass
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Makefile Backdoors
+    # ========================================================================
+    
+    def _check_makefiles(self) -> int:
+        """
+        Check Makefiles for backdoor patterns.
+        
+        Looks for curl, wget, python, netcat, bash in make recipes.
+        """
+        count = 0
+        
+        makefile_patterns = [r'Makefile$', r'makefile$', r'\.mk$', r'GNUmakefile$']
+        makefile_files = self.handler.find_files(makefile_patterns)
+        
+        for filepath, member in makefile_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in MAKEFILE_BACKDOOR_PATTERNS:
+                    if re.search(pattern, line, re.IGNORECASE):
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="makefile_backdoor",
+                            severity="MEDIUM",
+                            description=description,
+                            indicator=line[:100].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: IP Connection Patterns
+    # ========================================================================
+    
+    def _check_ip_connections(self) -> int:
+        """
+        Search for hardcoded IP:port patterns and /dev/tcp connections.
+        
+        This can reveal C2 server addresses or backdoor connections.
+        """
+        count = 0
+        
+        # Search all text-like files
+        text_patterns = [
+            r'\.sh$', r'\.bash$', r'\.py$', r'\.pl$', r'\.rb$',
+            r'\.php$', r'\.js$', r'\.conf$', r'\.cfg$', r'\.ini$',
+            r'\.yml$', r'\.yaml$', r'\.json$', r'\.xml$',
+            r'crontab$', r'rc\.local$', r'\.bashrc$', r'\.profile$',
+        ]
+        
+        files = self.handler.find_files(text_patterns)
+        
+        # Combined IP patterns
+        ip_patterns = IP_CONNECTION_PATTERNS + [
+            (r'\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):\d{2,5}\b', "IP:port connection"),
+        ]
+        
+        # Known safe/internal IPs to skip (configurable)
+        safe_ips = {'127.0.0.1', '0.0.0.0', '255.255.255.255', '192.168.', '10.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.'}
+        
+        for filepath, member in files:
+            if hasattr(member, 'size') and member.size > 500 * 1024:
+                continue
+            
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            
+            for line_num, line in enumerate(content.split('\n'), 1):
+                for pattern, description in ip_patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        matched_text = match.group(0)
+                        
+                        # Skip safe IPs
+                        is_safe = any(matched_text.startswith(safe) for safe in safe_ips)
+                        if is_safe:
+                            continue
+                        
+                        # /dev/tcp is always suspicious
+                        if '/dev/tcp' in matched_text:
+                            severity = "CRITICAL"
+                        else:
+                            severity = "HIGH"
+                        
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key="ip_connection",
+                            severity=severity,
+                            description=description,
+                            indicator=matched_text,
+                            line_number=line_num,
+                            raw_content=line[:200]
+                        )
+                        count += 1
+        
+        return count
+    
+    # ========================================================================
+    # NEW: Active Git Hooks (non-sample)
+    # ========================================================================
+    
+    def _check_git_hooks_active(self) -> int:
+        """
+        Find active (non-sample) git hooks that could be malicious.
+        
+        Searches for git hooks that are not .sample files.
+        """
+        count = 0
+        
+        # Find all .git/hooks directories
+        git_hook_patterns = [r'\.git/hooks/']
+        
+        # Get all files in git hooks directories
+        hook_files = self.handler.find_files([r'\.git/hooks/[^/]+$'])
+        
+        for filepath, member in hook_files:
+            # Skip sample files
+            if filepath.endswith('.sample'):
+                continue
+            
+            basename = os.path.basename(filepath)
+            
+            # Common hook names
+            hook_names = ['pre-commit', 'post-commit', 'pre-push', 'post-receive',
+                         'pre-receive', 'update', 'post-update', 'pre-rebase',
+                         'post-checkout', 'post-merge', 'pre-auto-gc', 'commit-msg',
+                         'prepare-commit-msg', 'applypatch-msg', 'post-applypatch']
+            
+            if basename in hook_names:
+                self._add_finding(
+                    filepath=filepath,
+                    technique_key="git_hook_active",
+                    severity="MEDIUM",
+                    description=f"Active git hook: {basename}",
+                    indicator=basename
+                )
+                count += 1
+                
+                # Check content for suspicious patterns
+                data = self.handler.get_file(filepath)
+                if data:
+                    try:
+                        content = data.decode('utf-8', errors='replace')
+                        for line_num, line in enumerate(content.split('\n'), 1):
+                            for pattern, description in SKETCHY_CODE_PATTERNS + REVERSE_SHELL_PATTERNS:
+                                if re.search(pattern, line, re.IGNORECASE):
+                                    self._add_finding(
+                                        filepath=filepath,
+                                        technique_key="git_hook_active",
+                                        severity="HIGH",
+                                        description=f"Git hook with: {description}",
+                                        indicator=line[:100].strip(),
+                                        line_number=line_num,
+                                        raw_content=line[:200]
+                                    )
+                                    count += 1
+                    except Exception:
+                        pass
+        
+        return count
+    
+    # ========================================================================
     # Summary and Export
     # ========================================================================
     
@@ -2391,6 +3458,19 @@ Detected Techniques (mapped to MITRE ATT&CK):
   - Rootkits: LKM (T1547.006), LD.so.preload
   - Web Shells (T1505.003)
   - Container Escape (T1610)
+  
+NEW Extended Checks:
+  - SSHD Config: PermitRootLogin, AuthorizedKeysFile, etc. (T1021.004)
+  - Environment Persistence: /etc/environment, pam_env.conf (T1546.004)
+  - Docker Persistence: Bind mounts, privileged containers (T1609)
+  - Kernel Modules: modprobe.d, modules-load.d (T1547.006)
+  - Dracut Modules: initramfs persistence (T1542)
+  - Sketchy Code: curl|wget|nc|bash -i|/dev/tcp patterns (T1059)
+  - NPM Backdoors: postinstall/preinstall hooks (T1195.001)
+  - Python Backdoors: setup.py, sitecustomize.py (T1195.001)
+  - Makefile Backdoors: curl/wget/bash in makefiles (T1195)
+  - IP Connections: Hardcoded IP:port patterns (T1046)
+  - Active Git Hooks: Non-sample git hooks (T1546)
 
 Reference: https://github.com/Aegrah/PANIX
         """

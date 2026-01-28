@@ -2,7 +2,7 @@
 """
 Linux Unified Security Analyzer - Orchestrator Script
 
-Runs all Linux forensic analysis tools in parallel and outputs correlated
+Runs all Linux forensic analysis tools in parallel and outputs
 results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
@@ -429,137 +429,6 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
     return summary_path
 
 
-def create_correlated_timeline(output_dir: str, hostname: str, results: List[Dict]) -> Optional[str]:
-    """
-    Create a correlated master timeline from all analyzers.
-    Merges events from login timeline, journal, and security findings.
-    """
-    all_events = []
-    
-    # Read login timeline events
-    login_file = os.path.join(output_dir, f"{hostname}_login_timeline.csv")
-    if os.path.exists(login_file):
-        try:
-            with open(login_file, 'r', encoding='utf-8', errors='replace') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    all_events.append({
-                        "Timestamp": row.get("Timestamp", ""),
-                        "Source": "Login Timeline",
-                        "Event_Type": row.get("Event_Type", ""),
-                        "Username": row.get("Username", ""),
-                        "Source_IP": row.get("Source_IP", ""),
-                        "Hostname": row.get("Hostname", hostname),
-                        "Description": row.get("Description", ""),
-                        "Severity": row.get("Severity", "INFO"),
-                        "Source_File": row.get("Source_File", ""),
-                        "Raw_Data": row.get("Raw_Data", "")[:500]
-                    })
-        except Exception:
-            pass
-    
-    # Read journal events
-    journal_file = os.path.join(output_dir, f"{hostname}_journal.csv")
-    if os.path.exists(journal_file):
-        try:
-            with open(journal_file, 'r', encoding='utf-8', errors='replace') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    # Map priority to severity
-                    priority = row.get("Priority", "INFO")
-                    severity_map = {
-                        "EMERG": "CRITICAL", "ALERT": "CRITICAL", "CRIT": "CRITICAL",
-                        "ERR": "HIGH", "WARNING": "MEDIUM", "NOTICE": "LOW", 
-                        "INFO": "INFO", "DEBUG": "INFO"
-                    }
-                    severity = severity_map.get(priority, "INFO")
-                    
-                    all_events.append({
-                        "Timestamp": row.get("Timestamp", ""),
-                        "Source": "Journal",
-                        "Event_Type": row.get("Category", ""),
-                        "Username": row.get("User", ""),
-                        "Source_IP": row.get("Source_IP", ""),
-                        "Hostname": row.get("Hostname", hostname),
-                        "Description": row.get("Message", "")[:300],
-                        "Severity": severity,
-                        "Source_File": row.get("Source_File", ""),
-                        "Raw_Data": ""
-                    })
-        except Exception:
-            pass
-    
-    # Read persistence findings
-    persistence_file = os.path.join(output_dir, f"{hostname}_persistence.csv")
-    if os.path.exists(persistence_file):
-        try:
-            with open(persistence_file, 'r', encoding='utf-8', errors='replace') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    all_events.append({
-                        "Timestamp": "",  # Persistence findings don't have timestamps
-                        "Source": "Persistence Hunter",
-                        "Event_Type": row.get("Technique", ""),
-                        "Username": "",
-                        "Source_IP": "",
-                        "Hostname": hostname,
-                        "Description": row.get("Description", ""),
-                        "Severity": row.get("Severity", "MEDIUM"),
-                        "Source_File": row.get("Filepath", ""),
-                        "Raw_Data": row.get("Raw_Content", "")[:500]
-                    })
-        except Exception:
-            pass
-    
-    # Read security findings
-    for suffix in ["all", "binaries", "environment", "persistence"]:
-        sec_file = os.path.join(output_dir, f"{hostname}_security_{suffix}.csv")
-        if os.path.exists(sec_file):
-            try:
-                with open(sec_file, 'r', encoding='utf-8', errors='replace') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        all_events.append({
-                            "Timestamp": "",
-                            "Source": "Security Analyzer",
-                            "Event_Type": row.get("Finding_Type", row.get("Technique", "")),
-                            "Username": "",
-                            "Source_IP": "",
-                            "Hostname": hostname,
-                            "Description": row.get("Description", ""),
-                            "Severity": row.get("Severity", "MEDIUM"),
-                            "Source_File": row.get("Filepath", ""),
-                            "Raw_Data": row.get("Raw_Content", row.get("Indicator", ""))[:500]
-                        })
-            except Exception:
-                pass
-    
-    if not all_events:
-        return None
-    
-    # Sort by timestamp (events without timestamps go to the end)
-    def sort_key(event):
-        ts = event.get("Timestamp", "")
-        if ts:
-            return (0, ts)
-        return (1, "")
-    
-    all_events.sort(key=sort_key)
-    
-    # Write correlated timeline
-    output_file = os.path.join(output_dir, f"{hostname}_correlated_timeline.csv")
-    fieldnames = ["Timestamp", "Source", "Event_Type", "Severity", "Username", 
-                  "Source_IP", "Hostname", "Description", "Source_File", "Raw_Data"]
-    
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for event in all_events:
-            writer.writerow(event)
-    
-    return output_file
-
-
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
@@ -686,20 +555,6 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 if verbose:
                     print(f"  {Style.ERROR}✗ Error: {e}{Style.RESET}", file=sys.stderr)
     
-    # Create correlated timeline
-    if verbose:
-        print(f"\n{Style.INFO}Creating correlated timeline...{Style.RESET}", file=sys.stderr)
-    
-    correlated_file = create_correlated_timeline(output_dir, hostname, results)
-    if correlated_file:
-        if verbose:
-            try:
-                with open(correlated_file, 'r') as f:
-                    line_count = sum(1 for _ in f) - 1  # Subtract header
-                print(f"  {Style.SUCCESS}✓ Created with {line_count} total events{Style.RESET}", file=sys.stderr)
-            except:
-                print(f"  {Style.SUCCESS}✓ Created{Style.RESET}", file=sys.stderr)
-    
     end_time = datetime.now()
     
     # Create summary report
@@ -758,12 +613,12 @@ def main():
 Version: {__version__}
 
 This script runs all Linux forensic analysis tools in parallel and outputs
-correlated results to a unified analysis folder named [hostname]_analysis.
+results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
   • Login Timeline    - Authentication/login events from logs
   • Journal Analyzer  - Systemd journal entries
-  • Persistence Hunter - MITRE ATT&CK mapped persistence mechanisms
+  • Persistence Hunter - MITRE ATT&CK mapped persistence mechanisms (cron, systemd, etc.)
   • Security Analyzer  - Binary/environment security issues
 
 Examples:
@@ -784,11 +639,10 @@ Output:
   
   Files generated:
     [hostname]_login_timeline.csv       - Login/auth events
-    [hostname]_journal.csv              - Journal entries
+    [hostname]_journal.csv              - Journal entries  
     [hostname]_journal_security.csv     - Security-relevant journal entries
-    [hostname]_persistence.csv          - Persistence findings
+    [hostname]_persistence.csv          - ALL scheduled tasks + persistence findings
     [hostname]_security_*.csv           - Security analyzer findings
-    [hostname]_correlated_timeline.csv  - All events merged & sorted
     [hostname]_analysis_summary.txt     - Summary report
         """
     )

@@ -566,8 +566,25 @@ class TimelineEvent:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert event to dictionary for CSV output."""
+        # Calculate local timestamp from UTC
+        # Note: Timestamp is stored in UTC, Timestamp_Local is analysis machine's local time
+        timestamp_utc = ""
+        timestamp_local = ""
+        if self.timestamp:
+            timestamp_utc = self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            # Convert UTC to local time for reference
+            try:
+                from datetime import timezone
+                # Create UTC-aware datetime, then convert to local
+                utc_aware = self.timestamp.replace(tzinfo=timezone.utc)
+                local_dt = utc_aware.astimezone()  # Converts to local timezone
+                timestamp_local = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                timestamp_local = timestamp_utc  # Fallback to UTC if conversion fails
+        
         return {
-            "timestamp": self.timestamp.strftime("%Y-%m-%d %H:%M:%S") if self.timestamp else "",
+            "Timestamp": timestamp_utc,
+            "Timestamp_Local": timestamp_local,
             "event_type": self.event_type,
             "username": self.username,
             "source_ip": self.source_ip,
@@ -930,10 +947,10 @@ def parse_utmp_record(data: bytes) -> Optional[Dict]:
         else:
             source_ip = ut_host if ut_host and not ut_host.startswith(":") else ""
         
-        # Convert timestamp (ensure offset-naive for comparability)
+        # Convert timestamp to UTC (ensure offset-naive for comparability)
+        # Use utcfromtimestamp to avoid local timezone conversion
         try:
-            timestamp = datetime.fromtimestamp(ut_tv_sec) if ut_tv_sec > 0 else None
-            timestamp = make_naive(timestamp) if timestamp else None
+            timestamp = datetime.utcfromtimestamp(ut_tv_sec) if ut_tv_sec > 0 else None
         except (OSError, ValueError, OverflowError):
             timestamp = None
         
@@ -1087,8 +1104,7 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                     
                     if ll_time > 0:
                         try:
-                            timestamp = datetime.fromtimestamp(ll_time)
-                            timestamp = make_naive(timestamp)  # Ensure offset-naive
+                            timestamp = datetime.utcfromtimestamp(ll_time)  # UTC for consistency
                         except (OSError, ValueError, OverflowError):
                             timestamp = None
                             
@@ -1509,12 +1525,12 @@ def parse_syslog_timestamp(timestamp_str: str, reference_date: datetime = None) 
         datetime object or None (always offset-naive)
     """
     if reference_date is None:
-        reference_date = datetime.now()
+        reference_date = datetime.utcnow()
     
     reference_year = reference_date.year
     
     try:
-        # Add year to timestamp
+        # Add year to timestamp (parsed timestamps are assumed to be in UTC)
         dt = datetime.strptime(f"{reference_year} {timestamp_str}", "%Y %b %d %H:%M:%S")
         
         # Handle year rollover for forensic analysis:
@@ -1585,8 +1601,8 @@ def parse_audit_timestamp(line: str) -> Optional[datetime]:
     if match:
         try:
             epoch = int(match.group(1))
-            dt = datetime.fromtimestamp(epoch)
-            return make_naive(dt)  # Ensure offset-naive
+            dt = datetime.utcfromtimestamp(epoch)  # UTC for forensic consistency
+            return dt
         except (OSError, ValueError, OverflowError):
             pass
     return None
@@ -1607,19 +1623,19 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
     """
     events = []
     
-    # Determine reference date for year inference
+    # Determine reference date for year inference (use UTC for consistency)
     if reference_date is None:
         # Try to get file modification time as reference
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.fromtimestamp(mtime)
+                reference_date = datetime.utcfromtimestamp(mtime)
             except (OSError, ValueError):
-                reference_date = datetime.now()
+                reference_date = datetime.utcnow()
         else:
-            # Data was provided (from tarball), use datetime.now() as fallback
+            # Data was provided (from tarball), use datetime.utcnow() as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.now()
+            reference_date = datetime.utcnow()
     
     # Helper to safely get group or empty string
     def safe_group(groups, idx, default=""):
@@ -2235,19 +2251,19 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
     """
     events = []
     
-    # Determine reference date for year inference
+    # Determine reference date for year inference (use UTC for consistency)
     if reference_date is None:
         # Try to get file modification time as reference
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.fromtimestamp(mtime)
+                reference_date = datetime.utcfromtimestamp(mtime)
             except (OSError, ValueError):
-                reference_date = datetime.now()
+                reference_date = datetime.utcnow()
         else:
-            # Data was provided (from tarball), use datetime.now() as fallback
+            # Data was provided (from tarball), use datetime.utcnow() as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.now()
+            reference_date = datetime.utcnow()
     
     # Keywords that indicate login/user activity
     LOGIN_KEYWORDS = [
@@ -2509,8 +2525,7 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
                     epoch = int(line[1:])
                     # Validate epoch is reasonable (after 2000, before 2100)
                     if 946684800 < epoch < 4102444800:
-                        current_timestamp = datetime.fromtimestamp(epoch)
-                        current_timestamp = make_naive(current_timestamp)
+                        current_timestamp = datetime.utcfromtimestamp(epoch)  # UTC for consistency
                 except (ValueError, OSError, OverflowError):
                     # Not a valid timestamp, might be a comment
                     pass
@@ -2619,10 +2634,9 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
                     username = parts[j + 1]
                     break
             
-            # Get file modification time
+            # Get file modification time in UTC
             try:
-                mtime = datetime.fromtimestamp(member.mtime)
-                mtime = make_naive(mtime)
+                mtime = datetime.utcfromtimestamp(member.mtime)
             except (OSError, ValueError, OverflowError):
                 mtime = None
             
@@ -2943,7 +2957,8 @@ class LinuxLoginTimeline:
             output_path: Path to output CSV file
         """
         fieldnames = [
-            "timestamp",
+            "Timestamp",
+            "Timestamp_Local",
             "event_type",
             "username",
             "source_ip",
