@@ -8,13 +8,21 @@ This toolkit provides a **unified analyzer** that runs multiple forensic analysi
 
 ## Tools Included
 
+### Disk Forensics (UAC Tarballs)
+
 | Tool | Description |
 |------|-------------|
-| **linux_analyzer.py** | Main orchestrator - runs all analyzers in parallel |
+| **linux_analyzer.py** | Main orchestrator - runs all disk analyzers in parallel |
 | **linux_login_timeline.py** | Login/authentication event timeline |
 | **linux_journal_analyzer.py** | Systemd journal analysis |
-| **linux_persistence_hunter.py** | PANIX-style persistence detection |
+| **linux_persistence_hunter.py** | PANIX-style persistence detection + Docker enumeration |
 | **linux_security_analyzer.py** | Binary/environment security analysis |
+
+### Memory Forensics (Volatility 3)
+
+| Tool | Description |
+|------|-------------|
+| **linux_memory_analyzer.py** | Volatility 3 automation for Linux memory dumps |
 
 ## Requirements
 
@@ -52,6 +60,19 @@ python linux_journal_analyzer.py -s hostname.tar.gz -o journal.csv
 
 # Security/binary analysis only
 python linux_security_analyzer.py -s hostname.tar.gz -o security.csv
+```
+
+### Memory Analysis (Requires Volatility 3)
+
+```bash
+# Full memory analysis
+python linux_memory_analyzer.py -i memory.lime
+
+# Quick triage (essential plugins only)
+python linux_memory_analyzer.py -i memory.lime --quick
+
+# Include rootkit detection plugins
+python linux_memory_analyzer.py -i memory.lime --all
 ```
 
 ## Output Files
@@ -218,10 +239,15 @@ All timestamps are output in **UTC** for forensic accuracy. A secondary `Timesta
 
 ## Documentation
 
+### Disk Forensics
 - [linux_analyzer.py](README_linux_analyzer.md) - Main orchestrator details
 - [linux_login_timeline.py](README_linux_login_timeline.md) - Login timeline details
 - [linux_journal_analyzer.py](README_linux_journal_analyzer.md) - Journal analyzer details
 - [linux_persistence_hunter.py](README_linux_persistence_hunter.md) - Persistence hunter details
+- [linux_security_analyzer.py](README_linux_security_analyzer.md) - Security analyzer details
+
+### Memory Forensics
+- [linux_memory_analyzer.py](README_linux_memory_analyzer.md) - Volatility 3 automation
 
 ## License
 

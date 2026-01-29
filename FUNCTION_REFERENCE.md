@@ -151,6 +151,44 @@ Combined binary analysis and security scanning.
 
 ---
 
+---
+
+## linux_memory_analyzer.py
+
+Volatility 3 automation for Linux memory forensics.
+
+### Classes
+
+| Class | Description |
+|-------|-------------|
+| `Style` | ANSI escape codes for colored console output. Consistent styling for terminal messages. |
+| `VolatilityRunner` | Handles running Volatility 3 plugins against a memory image. Manages command execution, output capture, and error handling for each plugin. |
+| `LinuxMemoryAnalyzer` | Main analyzer class that orchestrates memory analysis. Validates inputs, runs all plugins, and generates summary reports. |
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `quick_triage(image_path, vol_path, verbose)` | Runs a quick triage analysis with only essential plugins (pslist, netstat, bash, malfind). Returns results dictionary for rapid initial assessment. |
+| `main()` | Entry point that parses command line arguments and runs either quick triage or full analysis based on flags. |
+
+### Plugin Categories
+
+The analyzer runs these Volatility 3 plugin categories:
+
+| Category | Plugins |
+|----------|---------|
+| Kernel Identification | banners, linux.info |
+| Process Analysis | linux.pslist, linux.psscan, linux.pstree, linux.psaux |
+| Network Analysis | linux.netstat, linux.sockstat, linux.unix |
+| Kernel Module Integrity | linux.lsmod, linux.check_modules, linux.hidden_modules |
+| Memory Injection | linux.malfind, linux.proc.Maps |
+| Privileges | linux.check_creds |
+| Environment | linux.envars |
+| User Activity | linux.who, linux.bash |
+
+---
+
 ## Common Patterns
 
 ### Error Handling
