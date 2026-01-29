@@ -10,12 +10,14 @@ Included Analyzers:
 - linux_journal_analyzer.py  - Systemd journal analysis
 - linux_persistence_hunter.py - Persistence mechanism detection
 - linux_security_analyzer.py  - Binary/environment security analysis
+- linux_memory_analyzer.py   - Memory forensics (optional, requires memory dump)
 
 Author: Security Tools
-Version: 1.0.0
+Version: 1.1.0
 License: MIT
 
 Requirements: Python 3.6+ (standard library only)
+             Volatility 3 (optional, for memory analysis)
 """
 
 import argparse
@@ -32,7 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 
 # ============================================================================
@@ -357,6 +359,76 @@ def run_security_analyzer(source_path: str, output_dir: str, hostname: str) -> D
     return result
 
 
+def run_memory_analyzer(memory_path: str, output_dir: str, hostname: str,
+                        symbol_dirs: List[str] = None, quick: bool = False) -> Dict:
+    """Run the memory analyzer (Volatility 3 wrapper)."""
+    result = {
+        "name": "Memory Analyzer",
+        "success": False,
+        "output_files": [],
+        "finding_count": 0,
+        "error": None
+    }
+    
+    try:
+        # Import the module
+        import linux_memory_analyzer as lma
+        
+        # Check if Volatility is installed
+        installed, msg = lma.check_volatility_installed()
+        if not installed:
+            result["error"] = f"Volatility 3 not installed. Run: python linux_memory_analyzer.py --setup"
+            return result
+        
+        # Create memory-specific output subdirectory
+        memory_output_dir = os.path.join(output_dir, "memory_analysis")
+        os.makedirs(memory_output_dir, exist_ok=True)
+        
+        # Create analyzer
+        analyzer = lma.LinuxMemoryAnalyzer(
+            image_path=memory_path,
+            output_dir=memory_output_dir,
+            symbol_dirs=symbol_dirs,
+            offline=True  # Don't try to download symbols
+        )
+        
+        # Validate
+        valid, msg = analyzer.validate()
+        if not valid:
+            result["error"] = msg
+            return result
+        
+        # Run analysis
+        if quick:
+            # Quick triage mode
+            lma.quick_triage(memory_path, symbol_dirs=symbol_dirs, verbose=False)
+        else:
+            analyzer.analyze(include_optional=False, verbose=False, skip_symbol_check=True)
+        
+        # Count output files
+        if os.path.exists(memory_output_dir):
+            for filename in os.listdir(memory_output_dir):
+                if filename.endswith('.csv'):
+                    filepath = os.path.join(memory_output_dir, filename)
+                    result["output_files"].append(filepath)
+                    # Count rows in CSV
+                    try:
+                        with open(filepath, 'r') as f:
+                            lines = sum(1 for _ in f) - 1  # Subtract header
+                            result["finding_count"] += max(0, lines)
+                    except:
+                        pass
+        
+        result["success"] = True
+        
+    except ImportError:
+        result["error"] = "linux_memory_analyzer.py not found"
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
+
+
 # ============================================================================
 # Correlation and Summary
 # ============================================================================
@@ -434,7 +506,8 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
 # ============================================================================
 
 def run_analysis(source_path: str, output_base: str = None, parallel: bool = True,
-                verbose: bool = True) -> Tuple[str, List[Dict]]:
+                verbose: bool = True, memory_path: str = None, 
+                symbol_dirs: List[str] = None, quick_memory: bool = False) -> Tuple[str, List[Dict]]:
     """
     Run all analyzers on the source and output to a unified directory.
     
@@ -443,6 +516,9 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         output_base: Base directory for output (default: current directory)
         parallel: Whether to run analyzers in parallel
         verbose: Whether to print progress
+        memory_path: Optional path to memory dump for memory analysis
+        symbol_dirs: Optional list of symbol directories for memory analysis
+        quick_memory: Run quick memory triage instead of full analysis
     
     Returns:
         Tuple of (output_directory, results_list)
@@ -555,6 +631,40 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 if verbose:
                     print(f"  {Style.ERROR}✗ Error: {e}{Style.RESET}", file=sys.stderr)
     
+    # Run memory analyzer if memory path provided
+    if memory_path and os.path.exists(memory_path):
+        if verbose:
+            print(f"\n{Style.INFO}Running Memory Analyzer...{Style.RESET}", file=sys.stderr)
+            print(f"  {Style.DIM}Image: {memory_path}{Style.RESET}", file=sys.stderr)
+            if symbol_dirs:
+                print(f"  {Style.DIM}Symbols: {', '.join(symbol_dirs)}{Style.RESET}", file=sys.stderr)
+        
+        try:
+            mem_result = run_memory_analyzer(
+                memory_path=memory_path,
+                output_dir=output_dir,
+                hostname=hostname,
+                symbol_dirs=symbol_dirs,
+                quick=quick_memory
+            )
+            results.append(mem_result)
+            
+            if verbose:
+                if mem_result["success"]:
+                    count_str = f" ({mem_result['finding_count']} entries)" if mem_result.get('finding_count') else ""
+                    print(f"  {Style.SUCCESS}[OK] Memory Analyzer{count_str}{Style.RESET}", file=sys.stderr)
+                else:
+                    print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {mem_result.get('error', 'Unknown error')}{Style.RESET}", file=sys.stderr)
+        except Exception as e:
+            results.append({
+                "name": "Memory Analyzer",
+                "success": False,
+                "output_files": [],
+                "error": str(e)
+            })
+            if verbose:
+                print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {e}{Style.RESET}", file=sys.stderr)
+    
     end_time = datetime.now()
     
     # Create summary report
@@ -616,14 +726,18 @@ This script runs all Linux forensic analysis tools in parallel and outputs
 results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
-  • Login Timeline    - Authentication/login events from logs
-  • Journal Analyzer  - Systemd journal entries
-  • Persistence Hunter - MITRE ATT&CK mapped persistence mechanisms (cron, systemd, etc.)
+  • Login Timeline     - Authentication/login events from logs
+  • Journal Analyzer   - Systemd journal entries
+  • Persistence Hunter - MITRE ATT&CK mapped persistence mechanisms
   • Security Analyzer  - Binary/environment security issues
+  • Memory Analyzer    - Volatility 3 memory forensics (optional)
 
 Examples:
   # Analyze a UAC tarball
   python linux_analyzer.py -s hostname.tar.gz
+  
+  # Analyze with memory dump included
+  python linux_analyzer.py -s hostname.tar.gz -m memory.lime --symbols /path/to/symbols
   
   # Analyze to specific output directory
   python linux_analyzer.py -s hostname.tar.gz -o ./analysis_results/
@@ -631,8 +745,16 @@ Examples:
   # Run analyzers sequentially (not parallel)
   python linux_analyzer.py -s hostname.tar.gz --sequential
   
-  # Analyze extracted UAC directory
-  python linux_analyzer.py -s ./extracted_uac/
+  # Analyze extracted UAC directory with memory
+  python linux_analyzer.py -s ./extracted_uac/ -m ./memory.lime --symbols ./symbols/
+
+Memory Analysis:
+  To include memory analysis, you need:
+  1. A memory dump file (.lime, .raw, etc.)
+  2. Matching symbol files for the kernel
+  
+  First-time setup: python linux_memory_analyzer.py --setup
+  Identify kernel:  python linux_memory_analyzer.py -i memory.lime --banner
 
 Output:
   Creates directory: [hostname]_analysis/
@@ -644,6 +766,7 @@ Output:
     [hostname]_persistence.csv          - ALL scheduled tasks + persistence findings
     [hostname]_security_*.csv           - Security analyzer findings
     [hostname]_analysis_summary.txt     - Summary report
+    memory_analysis/*.csv               - Memory forensics results (if -m provided)
         """
     )
     
@@ -671,6 +794,26 @@ Output:
         help='Suppress progress output'
     )
     
+    # Memory analysis options
+    parser.add_argument(
+        '-m', '--memory',
+        default=None,
+        help='Path to memory dump file (.lime, .raw, etc.) for memory analysis'
+    )
+    
+    parser.add_argument(
+        '--symbols',
+        action='append',
+        default=[],
+        help='Path to symbol directory for memory analysis (can be specified multiple times)'
+    )
+    
+    parser.add_argument(
+        '--quick-memory',
+        action='store_true',
+        help='Run quick memory triage instead of full analysis'
+    )
+    
     parser.add_argument(
         '-v', '--version',
         action='version',
@@ -687,12 +830,21 @@ Output:
         print(f"{Style.ERROR}Error: Source not found: {source_path}{Style.RESET}", file=sys.stderr)
         sys.exit(1)
     
+    # Resolve memory path if provided
+    memory_path = os.path.abspath(args.memory) if args.memory else None
+    if memory_path and not os.path.exists(memory_path):
+        print(f"{Style.ERROR}Error: Memory image not found: {memory_path}{Style.RESET}", file=sys.stderr)
+        sys.exit(1)
+    
     try:
         output_dir, results = run_analysis(
             source_path=source_path,
             output_base=output_base,
             parallel=not args.sequential,
-            verbose=not args.quiet
+            verbose=not args.quiet,
+            memory_path=memory_path,
+            symbol_dirs=args.symbols if args.symbols else None,
+            quick_memory=args.quick_memory
         )
         
         # Exit with error code if any analyzer failed completely
