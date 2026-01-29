@@ -2776,56 +2776,444 @@ class PersistenceHunter:
     
     def _check_docker_persistence(self) -> int:
         """
-        Check Docker configurations for persistence mechanisms.
+        Comprehensive Docker analysis - extracts ALL Docker information.
         
-        Looks for:
-        - Suspicious bind mounts in /var/lib/docker/
-        - Privileged container configs
-        - Docker socket mounts
+        Checks for:
+        - Docker installation (binaries, service files)
+        - Docker daemon configuration
+        - All containers (running and stopped)
+        - Container configurations (mounts, privileges, networks)
+        - Docker images
+        - Docker volumes
+        - Docker networks
+        - Docker Compose files
+        - Dockerfiles
+        - Docker socket permissions
+        - Suspicious persistence patterns
         """
         count = 0
+        docker_installed = False
         
-        docker_paths = [
-            "var/lib/docker/",
-            "etc/docker/",
+        # ================================================================
+        # 1. Check if Docker is installed
+        # ================================================================
+        docker_binaries = [
+            "usr/bin/docker",
+            "usr/local/bin/docker",
+            "usr/bin/dockerd",
+            "usr/bin/containerd",
         ]
         
-        # Find all files in docker directories
-        docker_files = []
-        for docker_path in docker_paths:
-            docker_files.extend(self.handler.list_directory(docker_path))
+        for binary_path in docker_binaries:
+            data = self.handler.get_file(binary_path)
+            if data:
+                docker_installed = True
+                self._add_finding(
+                    filepath=binary_path,
+                    technique_key="docker_persistence",
+                    severity="INFO",
+                    description="Docker binary found - Docker is installed",
+                    indicator=binary_path
+                )
+                count += 1
+                break
         
-        # Also search for docker-related config files
-        docker_config_patterns = [r'docker.*\.json$', r'Dockerfile', r'docker-compose']
-        config_files = self.handler.find_files(docker_config_patterns)
+        # Check for Docker service
+        docker_service_paths = [
+            "etc/systemd/system/docker.service",
+            "usr/lib/systemd/system/docker.service",
+            "lib/systemd/system/docker.service",
+        ]
         
-        for filepath, member in config_files:
-            docker_files.append(filepath)
+        for service_path in docker_service_paths:
+            data = self.handler.get_file(service_path)
+            if data:
+                docker_installed = True
+                self._add_finding(
+                    filepath=service_path,
+                    technique_key="docker_persistence",
+                    severity="INFO",
+                    description="Docker systemd service found",
+                    indicator="Docker service is configured",
+                    raw_content=data.decode('utf-8', errors='replace')[:500]
+                )
+                count += 1
+                break
         
-        for filepath in docker_files:
-            data = self.handler.get_file(filepath)
-            if not data:
+        if not docker_installed:
+            # Check var/lib/docker existence as final check
+            docker_lib_files = self.handler.list_directory("var/lib/docker/")
+            if docker_lib_files:
+                docker_installed = True
+        
+        if not docker_installed:
+            self._add_finding(
+                filepath="",
+                technique_key="docker_persistence",
+                severity="INFO",
+                description="Docker does not appear to be installed on this system",
+                indicator="No Docker binaries, services, or data directories found"
+            )
+            return 1
+        
+        # ================================================================
+        # 2. Docker Daemon Configuration
+        # ================================================================
+        daemon_config_paths = [
+            "etc/docker/daemon.json",
+            "root/.docker/daemon.json",
+        ]
+        
+        for config_path in daemon_config_paths:
+            data = self.handler.get_file(config_path)
+            if data:
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                    self._add_finding(
+                        filepath=config_path,
+                        technique_key="docker_persistence",
+                        severity="INFO",
+                        description="Docker daemon configuration",
+                        indicator="Docker daemon.json found",
+                        raw_content=content[:1000]
+                    )
+                    count += 1
+                    
+                    # Check for insecure configurations
+                    if '"insecure-registries"' in content:
+                        self._add_finding(
+                            filepath=config_path,
+                            technique_key="docker_persistence",
+                            severity="MEDIUM",
+                            description="Docker configured with insecure registries",
+                            indicator="insecure-registries configured",
+                            raw_content=content[:500]
+                        )
+                        count += 1
+                    
+                    if '"live-restore"' in content and 'false' in content.lower():
+                        self._add_finding(
+                            filepath=config_path,
+                            technique_key="docker_persistence",
+                            severity="LOW",
+                            description="Docker live-restore disabled",
+                            indicator="live-restore: false"
+                        )
+                        count += 1
+                except Exception:
+                    pass
+        
+        # ================================================================
+        # 3. Enumerate All Containers
+        # ================================================================
+        containers_path = "var/lib/docker/containers/"
+        container_dirs = self.handler.list_directory(containers_path)
+        
+        container_count = 0
+        for container_dir in container_dirs:
+            if not container_dir or container_dir == containers_path:
                 continue
             
+            # Get container config
+            config_path = f"{container_dir}/config.v2.json" if not container_dir.endswith('/') else f"{container_dir}config.v2.json"
+            config_data = self.handler.get_file(config_path)
+            
+            if config_data:
+                container_count += 1
+                try:
+                    content = config_data.decode('utf-8', errors='replace')
+                    
+                    # Extract container info
+                    container_id = os.path.basename(container_dir.rstrip('/'))[:12]
+                    
+                    # Try to parse JSON for details
+                    import json
+                    try:
+                        config = json.loads(content)
+                        container_name = config.get('Name', '').lstrip('/')
+                        image = config.get('Config', {}).get('Image', 'unknown')
+                        state = config.get('State', {})
+                        running = state.get('Running', False)
+                        
+                        status = "RUNNING" if running else "STOPPED"
+                        
+                        self._add_finding(
+                            filepath=config_path,
+                            technique_key="docker_persistence",
+                            severity="INFO",
+                            description=f"Docker Container: {container_name} ({status})",
+                            indicator=f"ID: {container_id}, Image: {image}",
+                            raw_content=f"Name: {container_name}\nImage: {image}\nStatus: {status}\nID: {container_id}"
+                        )
+                        count += 1
+                        
+                        # Check for privileged mode
+                        host_config = config.get('HostConfig', {})
+                        if host_config.get('Privileged', False):
+                            self._add_finding(
+                                filepath=config_path,
+                                technique_key="docker_persistence",
+                                severity="CRITICAL",
+                                description=f"PRIVILEGED Container: {container_name}",
+                                indicator="Container runs in privileged mode - full host access",
+                                raw_content=f"Container {container_name} has privileged=true"
+                            )
+                            count += 1
+                        
+                        # Check for dangerous mounts
+                        binds = host_config.get('Binds', []) or []
+                        for bind in binds:
+                            if isinstance(bind, str):
+                                # Check for dangerous mounts
+                                dangerous_mounts = [
+                                    ('/:/host', 'Root filesystem mounted'),
+                                    ('/etc:', '/etc mounted'),
+                                    ('/root:', '/root mounted'),
+                                    ('/var/run/docker.sock', 'Docker socket mounted'),
+                                    ('/proc:', '/proc mounted'),
+                                    ('/sys:', '/sys mounted'),
+                                ]
+                                
+                                for pattern, desc in dangerous_mounts:
+                                    if pattern in bind:
+                                        self._add_finding(
+                                            filepath=config_path,
+                                            technique_key="docker_persistence",
+                                            severity="HIGH" if 'socket' in pattern else "MEDIUM",
+                                            description=f"Container mount: {desc}",
+                                            indicator=f"Container: {container_name}, Mount: {bind}",
+                                            raw_content=bind
+                                        )
+                                        count += 1
+                        
+                        # Check for host network mode
+                        if host_config.get('NetworkMode') == 'host':
+                            self._add_finding(
+                                filepath=config_path,
+                                technique_key="docker_persistence",
+                                severity="MEDIUM",
+                                description=f"Container using host network: {container_name}",
+                                indicator="NetworkMode: host",
+                                raw_content=f"Container {container_name} uses host network namespace"
+                            )
+                            count += 1
+                        
+                        # Check for host PID namespace
+                        if host_config.get('PidMode') == 'host':
+                            self._add_finding(
+                                filepath=config_path,
+                                technique_key="docker_persistence",
+                                severity="HIGH",
+                                description=f"Container using host PID namespace: {container_name}",
+                                indicator="PidMode: host",
+                                raw_content=f"Container {container_name} can see host processes"
+                            )
+                            count += 1
+                        
+                        # Check for added capabilities
+                        cap_add = host_config.get('CapAdd', []) or []
+                        if cap_add:
+                            for cap in cap_add:
+                                severity = "HIGH" if cap in ['SYS_ADMIN', 'SYS_PTRACE', 'NET_ADMIN'] else "MEDIUM"
+                                self._add_finding(
+                                    filepath=config_path,
+                                    technique_key="docker_persistence",
+                                    severity=severity,
+                                    description=f"Container with added capability: {cap}",
+                                    indicator=f"Container: {container_name}, Capability: {cap}",
+                                    raw_content=f"CapAdd: {cap_add}"
+                                )
+                                count += 1
+                        
+                    except json.JSONDecodeError:
+                        # Couldn't parse JSON, just log the container
+                        self._add_finding(
+                            filepath=config_path,
+                            technique_key="docker_persistence",
+                            severity="INFO",
+                            description=f"Docker Container found (ID: {container_id})",
+                            indicator=container_id,
+                            raw_content=content[:500]
+                        )
+                        count += 1
+                except Exception:
+                    pass
+        
+        if container_count > 0:
+            self._add_finding(
+                filepath=containers_path,
+                technique_key="docker_persistence",
+                severity="INFO",
+                description=f"Total Docker containers found: {container_count}",
+                indicator=f"{container_count} containers"
+            )
+            count += 1
+        
+        # ================================================================
+        # 4. Docker Images (from image database)
+        # ================================================================
+        image_db_path = "var/lib/docker/image/overlay2/repositories.json"
+        image_data = self.handler.get_file(image_db_path)
+        
+        if image_data:
             try:
-                content = data.decode('utf-8', errors='replace')
+                content = image_data.decode('utf-8', errors='replace')
+                import json
+                repos = json.loads(content)
+                
+                repositories = repos.get('Repositories', {})
+                image_list = []
+                for repo_name, tags in repositories.items():
+                    for tag, image_id in tags.items():
+                        image_list.append(f"{repo_name}:{tag}")
+                
+                if image_list:
+                    self._add_finding(
+                        filepath=image_db_path,
+                        technique_key="docker_persistence",
+                        severity="INFO",
+                        description=f"Docker Images ({len(image_list)} found)",
+                        indicator=", ".join(image_list[:10]) + ("..." if len(image_list) > 10 else ""),
+                        raw_content="\n".join(image_list)
+                    )
+                    count += 1
             except Exception:
-                continue
-            
-            for line_num, line in enumerate(content.split('\n'), 1):
-                for pattern, description in DOCKER_PERSISTENCE_PATTERNS:
-                    if re.search(pattern, line, re.IGNORECASE):
-                        severity = "CRITICAL" if "Privileged" in description or "socket" in description else "HIGH"
+                pass
+        
+        # ================================================================
+        # 5. Docker Volumes
+        # ================================================================
+        volumes_path = "var/lib/docker/volumes/"
+        volume_dirs = self.handler.list_directory(volumes_path)
+        
+        volume_names = []
+        for vol_dir in volume_dirs:
+            if vol_dir and vol_dir != volumes_path and 'metadata.db' not in vol_dir:
+                vol_name = os.path.basename(vol_dir.rstrip('/'))
+                if vol_name and vol_name != 'backingFsBlockDev':
+                    volume_names.append(vol_name)
+        
+        if volume_names:
+            self._add_finding(
+                filepath=volumes_path,
+                technique_key="docker_persistence",
+                severity="INFO",
+                description=f"Docker Volumes ({len(volume_names)} found)",
+                indicator=", ".join(volume_names[:10]) + ("..." if len(volume_names) > 10 else ""),
+                raw_content="\n".join(volume_names)
+            )
+            count += 1
+        
+        # ================================================================
+        # 6. Docker Networks
+        # ================================================================
+        networks_path = "var/lib/docker/network/files/local-kv.db"
+        network_data = self.handler.get_file(networks_path)
+        
+        if network_data:
+            self._add_finding(
+                filepath=networks_path,
+                technique_key="docker_persistence",
+                severity="INFO",
+                description="Docker network database found",
+                indicator="Docker custom networks may be configured"
+            )
+            count += 1
+        
+        # ================================================================
+        # 7. Docker Compose Files
+        # ================================================================
+        compose_patterns = [r'docker-compose\.ya?ml$', r'compose\.ya?ml$']
+        compose_files = self.handler.find_files(compose_patterns)
+        
+        for filepath, member in compose_files:
+            data = self.handler.get_file(filepath)
+            if data:
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key="docker_persistence",
+                        severity="INFO",
+                        description="Docker Compose file found",
+                        indicator=filepath,
+                        raw_content=content[:1500]
+                    )
+                    count += 1
+                    
+                    # Check for privileged in compose
+                    if 'privileged: true' in content or 'privileged:true' in content:
                         self._add_finding(
                             filepath=filepath,
                             technique_key="docker_persistence",
-                            severity=severity,
-                            description=description,
-                            indicator=line[:100].strip(),
-                            line_number=line_num,
-                            raw_content=line[:200]
+                            severity="CRITICAL",
+                            description="Docker Compose with privileged container",
+                            indicator="privileged: true in compose file",
+                            raw_content=content[:500]
                         )
                         count += 1
+                except Exception:
+                    pass
+        
+        # ================================================================
+        # 8. Dockerfiles
+        # ================================================================
+        dockerfile_patterns = [r'Dockerfile$', r'Dockerfile\.[a-zA-Z]+$']
+        dockerfiles = self.handler.find_files(dockerfile_patterns)
+        
+        for filepath, member in dockerfiles:
+            data = self.handler.get_file(filepath)
+            if data:
+                try:
+                    content = data.decode('utf-8', errors='replace')
+                    
+                    # Extract base image
+                    base_image = "unknown"
+                    for line in content.split('\n'):
+                        if line.strip().upper().startswith('FROM '):
+                            base_image = line.strip()[5:].strip()
+                            break
+                    
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key="docker_persistence",
+                        severity="INFO",
+                        description=f"Dockerfile found (base: {base_image})",
+                        indicator=f"Base image: {base_image}",
+                        raw_content=content[:1000]
+                    )
+                    count += 1
+                except Exception:
+                    pass
+        
+        # ================================================================
+        # 9. Docker Socket Permissions
+        # ================================================================
+        socket_path = "var/run/docker.sock"
+        # Can't check permissions in tarball easily, but check if it exists
+        
+        # Check for users in docker group
+        group_data = self.handler.get_file("etc/group")
+        if group_data:
+            try:
+                content = group_data.decode('utf-8', errors='replace')
+                for line in content.split('\n'):
+                    if line.startswith('docker:'):
+                        parts = line.split(':')
+                        if len(parts) >= 4 and parts[3]:
+                            docker_users = parts[3]
+                            self._add_finding(
+                                filepath="etc/group",
+                                technique_key="docker_persistence",
+                                severity="INFO",
+                                description="Users in docker group (can run containers)",
+                                indicator=f"Docker group members: {docker_users}",
+                                raw_content=line
+                            )
+                            count += 1
+                        break
+            except Exception:
+                pass
         
         return count
     
