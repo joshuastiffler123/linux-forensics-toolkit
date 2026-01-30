@@ -83,18 +83,39 @@ def extract_hostname_from_tarball(tarball_path: str) -> str:
     hostname = "unknown"
     
     # Try to get hostname from tarball filename
-    # UAC format: hostname-uac-timestamp.tar.gz
+    # UAC format: uac-hostname-timestamp.tar.gz (hostname comes AFTER uac-)
     basename = os.path.basename(tarball_path)
     for ext in ('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz', '.tar'):
         if basename.lower().endswith(ext):
             basename = basename[:-len(ext)]
             break
     
-    # Common UAC naming patterns
-    for sep in ['-uac', '_uac', '-UAC', '_UAC']:
-        if sep in basename:
-            hostname = basename.split(sep)[0]
-            break
+    # UAC naming pattern: uac-hostname-timestamp or uac_hostname_timestamp
+    # Hostname is the part AFTER "uac-" or "uac_"
+    lower_basename = basename.lower()
+    if lower_basename.startswith('uac-') or lower_basename.startswith('uac_'):
+        # Remove the "uac-" or "uac_" prefix
+        after_uac = basename[4:]  # Skip "uac-" or "uac_"
+        # Hostname is typically the next segment before the timestamp
+        # Format: hostname-YYYYMMDD or hostname_YYYYMMDD
+        parts = re.split(r'[-_]', after_uac)
+        if parts:
+            # Find the hostname (non-timestamp parts at the beginning)
+            hostname_parts = []
+            for part in parts:
+                # Stop if we hit a timestamp-like segment (all digits, 6+ chars)
+                if re.match(r'^\d{6,}$', part):
+                    break
+                hostname_parts.append(part)
+            if hostname_parts:
+                hostname = '-'.join(hostname_parts)
+    
+    # Fallback: check for old format (hostname-uac-timestamp)
+    if hostname == "unknown":
+        for sep in ['-uac', '_uac', '-UAC', '_UAC']:
+            if sep in basename:
+                hostname = basename.split(sep)[0]
+                break
     
     if hostname == "unknown":
         # Try first segment before common separators
