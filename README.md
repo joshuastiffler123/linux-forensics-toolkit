@@ -1,254 +1,158 @@
 # Linux Forensics Toolkit
 
-A comprehensive Python toolkit for analyzing Linux forensic collections from UAC (Unix-like Artifacts Collector) tarballs.
+A Python toolkit for analyzing Linux forensic collections (UAC tarballs) and memory dumps.
 
-## Overview
+## Setup
 
-This toolkit provides a **unified analyzer** that runs multiple forensic analysis tools in parallel, generating comprehensive reports for incident response and threat hunting.
+### Windows
 
-## Tools Included
+```powershell
+# 1. Clone the repository
+git clone https://github.com/joshuastiffler123/linux-forensics-toolkit.git
+cd linux-forensics-toolkit
 
-### Disk Forensics (UAC Tarballs)
+# 2. (Optional) Setup memory analysis - downloads Volatility 3
+python linux_memory_analyzer.py --setup
 
-| Tool | Description |
-|------|-------------|
-| **linux_analyzer.py** | Main orchestrator - runs all disk analyzers in parallel |
-| **linux_login_timeline.py** | Login/authentication event timeline |
-| **linux_journal_analyzer.py** | Systemd journal analysis |
-| **linux_persistence_hunter.py** | PANIX-style persistence detection + Docker enumeration |
-| **linux_security_analyzer.py** | Binary/environment security analysis |
+# 3. Verify installation
+python linux_memory_analyzer.py --check
+```
 
-### Memory Forensics (Volatility 3)
+### Linux / macOS
 
-| Tool | Description |
-|------|-------------|
-| **linux_memory_analyzer.py** | Volatility 3 automation for Linux memory dumps |
+```bash
+# 1. Clone the repository
+git clone https://github.com/joshuastiffler123/linux-forensics-toolkit.git
+cd linux-forensics-toolkit
 
-## Requirements
+# 2. (Optional) Setup memory analysis - downloads Volatility 3
+python3 linux_memory_analyzer.py --setup
 
-- **Python 3.6+**
-- **No external dependencies** - uses only Python standard library
+# 3. Verify installation
+python3 linux_memory_analyzer.py --check
+```
+
+### Requirements
+
+| Component | Requirement |
+|-----------|-------------|
+| **Disk Forensics** | Python 3.8+ (standard library only - no pip install needed) |
+| **Memory Forensics** | Python 3.8+, Git (for auto-setup) |
+
+**No external dependencies required for disk analysis** - works out of the box.
 
 ## Quick Start
 
-### Run Full Analysis (Recommended)
-
 ```bash
-# Analyze a UAC tarball
+# Analyze a UAC collection
 python linux_analyzer.py -s hostname.tar.gz
 
-# Analyze an extracted directory
-python linux_analyzer.py -s ./extracted_uac/
-
-# Specify output directory
-python linux_analyzer.py -s hostname.tar.gz -o ./analysis_output/
+# Analyze with memory dump
+python linux_analyzer.py -s hostname.tar.gz -m memory.lime --symbols /path/to/symbols
 ```
 
-This creates a folder `[hostname]_analysis/` containing all CSV reports.
+## Tools
 
-### Run Individual Tools
+### Main Orchestrator
+
+**`linux_analyzer.py`** - Runs all analyzers together and outputs to `[hostname]_analysis/`
 
 ```bash
-# Login timeline only
-python linux_login_timeline.py -s hostname.tar.gz -o timeline.csv
+python linux_analyzer.py -s <uac_tarball_or_directory> [options]
 
-# Persistence hunting only
-python linux_persistence_hunter.py -s hostname.tar.gz -o persistence.csv
-
-# Journal analysis only
-python linux_journal_analyzer.py -s hostname.tar.gz -o journal.csv
-
-# Security/binary analysis only
-python linux_security_analyzer.py -s hostname.tar.gz -o security.csv
+Options:
+  -s, --source      UAC tarball (.tar.gz) or extracted directory (required)
+  -o, --output      Output directory (default: current directory)
+  -m, --memory      Memory dump file for memory analysis (optional)
+  --symbols         Symbol directory for memory analysis
+  --quick-memory    Quick memory triage instead of full analysis
+  --sequential      Run analyzers one at a time instead of parallel
+  -q, --quiet       Suppress progress output
 ```
 
-### Memory Analysis (Requires Volatility 3)
+### Disk Forensics Tools
+
+| Tool | Purpose | Key Output |
+|------|---------|------------|
+| **linux_login_timeline.py** | Extracts login/auth events from logs (auth.log, wtmp, btmp, lastlog, bash_history) | `_login_timeline.csv` |
+| **linux_journal_analyzer.py** | Parses systemd journal binary logs | `_journal.csv`, `_journal_security.csv` |
+| **linux_persistence_hunter.py** | Detects persistence mechanisms (cron, systemd, SSH keys, etc.) with MITRE ATT&CK mapping | `_persistence.csv` |
+| **linux_security_analyzer.py** | Scans for suspicious binaries, SUID files, rootkit traces | `_security_*.csv` |
+
+### Memory Forensics
+
+**`linux_memory_analyzer.py`** - Volatility 3 wrapper for Linux memory dumps
 
 ```bash
-# Full memory analysis
-python linux_memory_analyzer.py -i memory.lime
+# First-time setup (downloads Volatility 3)
+python linux_memory_analyzer.py --setup
 
-# Quick triage (essential plugins only)
-python linux_memory_analyzer.py -i memory.lime --quick
+# Check installation
+python linux_memory_analyzer.py --check
 
-# Include rootkit detection plugins
-python linux_memory_analyzer.py -i memory.lime --all
+# Identify kernel version
+python linux_memory_analyzer.py -i memory.lime --banner
+
+# Run analysis with local symbols
+python linux_memory_analyzer.py -i memory.lime -s /path/to/symbols --offline
 ```
 
-## Output Files
+**Note:** Memory analysis requires symbol tables matching the exact kernel version. Use `--banner` to identify the kernel, then obtain/generate matching symbols.
 
-When running `linux_analyzer.py`, these files are generated:
+## Output Structure
 
 ```
 [hostname]_analysis/
-├── [hostname]_login_timeline.csv      # Login/auth events (UTC timestamps)
-├── [hostname]_journal.csv             # All journal entries
-├── [hostname]_journal_security.csv    # Security-relevant journal entries
-├── [hostname]_persistence.csv         # ALL scheduled tasks + persistence findings
-├── [hostname]_security_all.csv        # Combined security findings
-├── [hostname]_security_binaries.csv   # Binary analysis
-├── [hostname]_security_environment.csv # Environment analysis
-└── [hostname]_analysis_summary.txt    # Summary report
+├── [hostname]_login_timeline.csv       # Login/authentication events
+├── [hostname]_journal.csv              # Journal entries
+├── [hostname]_journal_security.csv     # Security-relevant journal entries
+├── [hostname]_persistence.csv          # Scheduled tasks + persistence findings
+├── [hostname]_security_*.csv           # Security findings
+├── [hostname]_analysis_summary.txt     # Summary report
+└── memory_analysis/                    # (if -m provided)
+    ├── pslist.csv                      # Running processes
+    ├── sockstat.csv                    # Network sockets
+    ├── bash_history.csv                # Bash history from memory
+    └── ...                             # Additional Volatility plugins
 ```
 
-## What Each Analyzer Detects
+## Requirements
 
-### Login Timeline (`linux_login_timeline.py`)
-
-Parses authentication logs and creates a chronological timeline:
-- SSH logins (password and key-based)
-- Failed login attempts with source IPs
-- sudo command execution
-- User account changes
-- Session activity (wtmp/btmp/lastlog)
-- Bash history with timestamps
-- System boot events
-
-**Sources:** `auth.log`, `secure`, `syslog`, `wtmp`, `btmp`, `lastlog`, `.bash_history`
-
-### Journal Analyzer (`linux_journal_analyzer.py`)
-
-Analyzes systemd journal logs:
-- All journal entries with proper timestamps
-- Security-relevant events filtered separately
-- Service start/stop events
-- Kernel messages
-- Authentication events
-
-**Sources:** `/var/log/journal/` binary journals
-
-### Persistence Hunter (`linux_persistence_hunter.py`)
-
-**Extracts ALL scheduled tasks for review** plus detects suspicious persistence:
-
-| Category | What's Checked |
-|----------|----------------|
-| **Cron Jobs** | `/etc/crontab`, `/etc/cron.d/`, `/etc/cron.daily/`, `/var/spool/cron/` |
-| **Systemd** | Services, timers, generators, socket activation |
-| **At Jobs** | `/var/spool/at/` |
-| **SSH** | `authorized_keys`, `sshd_config` (PermitRootLogin, etc.) |
-| **Users** | Backdoor users (UID=0), `/etc/passwd`, `/etc/shadow` |
-| **Shell Profiles** | `.bashrc`, `.profile`, `/etc/profile.d/` |
-| **Init Scripts** | `/etc/init.d/`, `/etc/rc.local` |
-| **LD_PRELOAD** | `/etc/ld.so.preload`, environment hijacking |
-| **PAM** | PAM configuration backdoors |
-| **Sudoers** | NOPASSWD rules, suspicious entries |
-| **Kernel Modules** | `/etc/modprobe.d/`, `/etc/modules-load.d/` |
-| **Dracut** | Initramfs persistence |
-| **Docker** | Bind mounts, privileged containers |
-| **Environment** | `/etc/environment`, `pam_env.conf` |
-| **Code Patterns** | curl/wget/nc/bash -i//dev/tcp patterns |
-| **NPM/Python** | postinstall hooks, setup.py, sitecustomize.py |
-| **Git Hooks** | Active (non-sample) hooks |
-| **IP Connections** | Hardcoded IP:port patterns |
-| **Web Shells** | PHP/JSP/ASP shells |
-
-All findings mapped to **MITRE ATT&CK** technique IDs.
-
-### Security Analyzer (`linux_security_analyzer.py`)
-
-Combined binary and persistence analysis:
-- Programs outside standard directories
-- Hidden executables (in .dot directories)
-- SUID/SGID files and capabilities
-- Rootkit traces
-- Environment variable analysis
-- Hash matching against IOCs
-
-## Workflow Diagram
-
-```
-                    ┌─────────────────────────┐
-                    │   UAC Tarball or        │
-                    │   Extracted Directory   │
-                    └───────────┬─────────────┘
-                                │
-                                ▼
-                    ┌─────────────────────────┐
-                    │   linux_analyzer.py     │
-                    │   (Main Orchestrator)   │
-                    └───────────┬─────────────┘
-                                │
-        ┌───────────────────────┼───────────────────────┐
-        │                       │                       │
-        ▼                       ▼                       ▼
-┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Login         │    │ Journal          │    │ Persistence      │
-│ Timeline      │    │ Analyzer         │    │ Hunter           │
-└───────┬───────┘    └────────┬─────────┘    └────────┬─────────┘
-        │                     │                       │
-        ▼                     ▼                       ▼
-┌───────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ _login_       │    │ _journal.csv     │    │ _persistence.csv │
-│ timeline.csv  │    │ _journal_        │    │ (ALL cron/timers │
-│               │    │ security.csv     │    │  + suspicious)   │
-└───────────────┘    └──────────────────┘    └──────────────────┘
-                                │
-                                ▼
-                    ┌──────────────────┐
-                    │ Security         │
-                    │ Analyzer         │
-                    └────────┬─────────┘
-                             │
-                             ▼
-                    ┌──────────────────┐
-                    │ _security_*.csv  │
-                    └──────────────────┘
-```
+- **Python 3.8+**
+- **Git** (for memory analyzer setup)
+- No external dependencies for disk forensics
 
 ## Examples
 
-### Analyze Multiple Systems
-
 ```bash
-# Process multiple tarballs
-for tarball in *.tar.gz; do
-    python linux_analyzer.py -s "$tarball" -o ./results/
-done
+# Basic UAC analysis
+python linux_analyzer.py -s server.tar.gz
+
+# Full analysis with memory
+python linux_analyzer.py -s server.tar.gz -m server.lime --symbols ./symbols/
+
+# Individual tools
+python linux_login_timeline.py -s server.tar.gz -o timeline.csv
+python linux_persistence_hunter.py -s server.tar.gz -o persistence.csv
+python linux_journal_analyzer.py -s server.tar.gz -o journal.csv
+python linux_security_analyzer.py -s server.tar.gz -o security.csv
 ```
 
-### Quick Persistence Check
+## Timestamps
 
-```bash
-# Just check for persistence mechanisms
-python linux_persistence_hunter.py -s evidence.tar.gz -o findings.csv -v
-```
+All timestamps are output in **UTC**. A `Timestamp_Local` column shows local time for reference.
 
-### Filter High-Severity Findings
+## Security
 
-After analysis, filter the CSV for critical/high findings:
-```bash
-# PowerShell
-Import-Csv persistence.csv | Where-Object {$_.Severity -in @('CRITICAL','HIGH')}
+This toolkit follows OWASP security guidelines:
 
-# Bash
-grep -E "CRITICAL|HIGH" persistence.csv
-```
-
-## Timestamp Handling
-
-All timestamps are output in **UTC** for forensic accuracy. A secondary `Timestamp_Local` column shows the analysis machine's local time for reference.
-
-## Security Features
-
-- Path traversal prevention (Zip/Tar slip attacks blocked)
-- Safe file extraction with path validation
-- Symlink attack prevention
-- Proper exception handling
-- No external dependencies (supply chain security)
-
-## Documentation
-
-### Disk Forensics
-- [linux_analyzer.py](README_linux_analyzer.md) - Main orchestrator details
-- [linux_login_timeline.py](README_linux_login_timeline.md) - Login timeline details
-- [linux_journal_analyzer.py](README_linux_journal_analyzer.md) - Journal analyzer details
-- [linux_persistence_hunter.py](README_linux_persistence_hunter.md) - Persistence hunter details
-- [linux_security_analyzer.py](README_linux_security_analyzer.md) - Security analyzer details
-
-### Memory Forensics
-- [linux_memory_analyzer.py](README_linux_memory_analyzer.md) - Volatility 3 automation
+- **No data exfiltration** - All output stays local (CSV files only)
+- **No external connections** - Only `git clone` during optional setup
+- **No code injection** - No eval/exec, subprocess uses arrays (no shell=True)
+- **Path traversal protection** - Safe extraction prevents zip/tar slip attacks
+- **No dependencies** - Disk forensics uses Python standard library only
+- **Read-only analysis** - Scripts only read forensic data, never modify
 
 ## License
 
-MIT License. Handle all evidence data according to your organization's chain of custody and data handling policies.
+MIT License

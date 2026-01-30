@@ -39,7 +39,6 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple

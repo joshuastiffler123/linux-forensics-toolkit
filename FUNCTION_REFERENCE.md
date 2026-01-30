@@ -6,7 +6,7 @@ Quick reference for all functions and classes in the Linux Forensics Toolkit.
 
 ## linux_analyzer.py
 
-Main orchestrator that runs all forensic analyzers in parallel.
+Main orchestrator that runs all forensic analyzers in parallel, including optional memory analysis.
 
 ### Classes
 
@@ -24,9 +24,10 @@ Main orchestrator that runs all forensic analyzers in parallel.
 | `run_journal_analyzer(source_path, output_dir, hostname)` | Runs the journal analyzer on the source. Returns a dictionary with success status, event count, and output files. |
 | `run_persistence_hunter(source_path, output_dir, hostname)` | Runs the persistence hunter on the source. Returns a dictionary with success status, finding count, and output files. |
 | `run_security_analyzer(source_path, output_dir, hostname)` | Runs the security analyzer on the source. Returns a dictionary with success status, finding count, and output files. |
+| `run_memory_analyzer(memory_path, output_dir, hostname, symbol_dirs, quick)` | Runs the memory analyzer on a memory dump file. Creates memory_analysis subdirectory with Volatility 3 output. Returns a dictionary with success status, finding count, and output files. |
 | `create_summary_report(output_dir, hostname, results, start_time, end_time)` | Creates a text summary report of all analyzer results. Writes statistics, findings summary, and file list to a summary file. |
-| `run_analysis(source_path, output_base, parallel, verbose)` | Main orchestrator function that runs all analyzers. Handles parallel/sequential execution and creates the output directory structure. |
-| `main()` | Entry point that parses command line arguments and calls run_analysis. |
+| `run_analysis(source_path, output_base, parallel, verbose, memory_path, symbol_dirs, quick_memory)` | Main orchestrator function that runs all analyzers. Handles parallel/sequential execution, optional memory analysis, and creates the output directory structure. |
+| `main()` | Entry point that parses command line arguments including -m/--memory and --symbols for memory analysis, then calls run_analysis. |
 
 ---
 
@@ -155,22 +156,54 @@ Combined binary analysis and security scanning.
 
 ## linux_memory_analyzer.py
 
-Volatility 3 automation for Linux memory forensics.
+Volatility 3 automation for Linux memory forensics with automatic setup.
 
 ### Classes
 
 | Class | Description |
 |-------|-------------|
 | `Style` | ANSI escape codes for colored console output. Consistent styling for terminal messages. |
-| `VolatilityRunner` | Handles running Volatility 3 plugins against a memory image. Manages command execution, output capture, and error handling for each plugin. |
-| `LinuxMemoryAnalyzer` | Main analyzer class that orchestrates memory analysis. Validates inputs, runs all plugins, and generates summary reports. |
+| `VolatilityRunner` | Handles running Volatility 3 plugins against a memory image. Manages command execution, output capture, error handling, symbol directories, and offline mode for each plugin. |
+| `LinuxMemoryAnalyzer` | Main analyzer class that orchestrates memory analysis. Validates inputs, detects kernel banners, checks symbol availability, runs all plugins, and generates summary reports. |
 
-### Functions
+### Setup Functions
 
 | Function | Description |
 |----------|-------------|
-| `quick_triage(image_path, vol_path, verbose)` | Runs a quick triage analysis with only essential plugins (pslist, netstat, bash, malfind). Returns results dictionary for rapid initial assessment. |
-| `main()` | Entry point that parses command line arguments and runs either quick triage or full analysis based on flags. |
+| `get_script_dir()` | Returns the directory containing the script. Used to locate the local Volatility 3 installation. |
+| `get_volatility_dir()` | Returns the expected path to the volatility3 installation directory (script_dir/volatility3). |
+| `get_venv_vol_path()` | Returns the path to the vol executable in the local venv. Handles Windows (.exe) and Linux paths. |
+| `check_volatility_installed()` | Checks if Volatility 3 is properly installed. Returns tuple of (installed, message). |
+| `setup_volatility(verbose)` | Automatically downloads and configures Volatility 3. Clones from GitHub, creates venv, installs dependencies, and applies schema fixes. |
+| `print_setup_instructions()` | Prints manual setup instructions when automatic setup is not available or fails. |
+
+### Analysis Functions
+
+| Function | Description |
+|----------|-------------|
+| `quick_triage(image_path, vol_path, verbose, symbol_dirs, isf_url)` | Runs quick triage analysis with essential plugins (banners, pslist, sockstat, bash, malfind). Returns results dictionary for rapid initial assessment. |
+| `main()` | Entry point that handles --setup, --check, --banner flags and runs either quick triage or full analysis based on arguments. |
+
+### VolatilityRunner Methods
+
+| Method | Description |
+|--------|-------------|
+| `_find_volatility()` | Finds Volatility 3 executable, preferring the local modified installation with schema fixes. |
+| `_build_base_cmd(offline)` | Builds base command with symbol directories and ISF URL options. Handles offline mode. |
+| `check_volatility()` | Verifies Volatility 3 is available and working. Returns tuple of (available, message). |
+| `detect_kernel_banner(verbose)` | Detects kernel banner from memory image (works without symbols). Returns banner string if found. |
+| `check_symbols(verbose)` | Checks if symbol tables are available for the image. Returns tuple of (available, message). |
+| `run_plugin(plugin, output_file, description, verbose)` | Runs a single Volatility plugin with timeout and error handling. Returns tuple of (success, message). |
+| `run_all_plugins(categories, verbose)` | Runs all plugins in specified categories. Returns dictionary of results. |
+
+### LinuxMemoryAnalyzer Methods
+
+| Method | Description |
+|--------|-------------|
+| `validate()` | Validates that analysis can proceed (image exists, volatility available). Returns tuple of (valid, message). |
+| `analyze(include_optional, verbose, skip_symbol_check)` | Runs full memory analysis with all or optional plugins. Returns dictionary of results. |
+| `_print_symbol_guidance(banner)` | Prints guidance for obtaining symbol tables when they're not found. |
+| `_generate_summary(verbose)` | Generates analysis summary report with plugin results and statistics. |
 
 ### Plugin Categories
 
@@ -178,14 +211,22 @@ The analyzer runs these Volatility 3 plugin categories:
 
 | Category | Plugins |
 |----------|---------|
-| Kernel Identification | banners, linux.info |
-| Process Analysis | linux.pslist, linux.psscan, linux.pstree, linux.psaux |
-| Network Analysis | linux.netstat, linux.sockstat, linux.unix |
-| Kernel Module Integrity | linux.lsmod, linux.check_modules, linux.hidden_modules |
-| Memory Injection | linux.malfind, linux.proc.Maps |
-| Privileges | linux.check_creds |
-| Environment | linux.envars |
-| User Activity | linux.who, linux.bash |
+| Kernel Identification | banners.Banners, linux.vmcoreinfo.VMCoreInfo |
+| Process Analysis | linux.pslist.PsList, linux.psscan.PsScan, linux.pstree.PsTree, linux.psaux.PsAux |
+| Network Analysis | linux.sockstat.Sockstat, linux.sockscan.Sockscan |
+| Kernel Module Integrity | linux.lsmod.Lsmod, linux.malware.check_modules, linux.malware.hidden_modules |
+| Memory Injection | linux.malware.malfind.Malfind, linux.proc.Maps |
+| Privileges | linux.malware.check_creds.Check_creds |
+| Environment | linux.envars.Envars |
+| User Activity | linux.bash.Bash |
+
+### Optional Plugins (with --all)
+
+| Category | Plugins |
+|----------|---------|
+| File Analysis | linux.lsof.Lsof, linux.pagecache.Files |
+| Rootkit Detection | linux.malware.check_syscall, linux.malware.check_idt, linux.malware.tty_check, linux.malware.netfilter |
+| Advanced | linux.kmsg.Kmsg, linux.mountinfo.MountInfo, linux.library_list.LibraryList, linux.elfs.Elfs, linux.capabilities.Capabilities |
 
 ---
 
