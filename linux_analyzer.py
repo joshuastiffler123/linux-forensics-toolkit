@@ -523,6 +523,71 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
 
 
 # ============================================================================
+# Tarball Discovery
+# ============================================================================
+
+TARBALL_EXTENSIONS = ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')
+
+
+def find_tarballs_in_directory(dir_path: str) -> List[str]:
+    """
+    Find all UAC tarballs in a directory (non-recursive, top-level only).
+    
+    Args:
+        dir_path: Directory to search
+        
+    Returns:
+        List of tarball paths found
+    """
+    tarballs = []
+    try:
+        for item in os.listdir(dir_path):
+            item_path = os.path.join(dir_path, item)
+            if os.path.isfile(item_path):
+                if any(item.lower().endswith(ext) for ext in TARBALL_EXTENSIONS):
+                    tarballs.append(item_path)
+    except PermissionError:
+        pass
+    return sorted(tarballs)
+
+
+def is_extracted_uac_directory(dir_path: str) -> bool:
+    """
+    Check if a directory appears to be an extracted UAC collection.
+    
+    Looks for typical UAC structure: var/log, etc/passwd, home/, etc.
+    
+    Args:
+        dir_path: Directory to check
+        
+    Returns:
+        True if this looks like an extracted UAC directory
+    """
+    # Check for common UAC artifacts
+    indicators = [
+        os.path.join(dir_path, "var", "log"),
+        os.path.join(dir_path, "etc", "passwd"),
+        os.path.join(dir_path, "etc", "hostname"),
+    ]
+    
+    # Also check for nested structure (hostname/var/log)
+    try:
+        for subdir in os.listdir(dir_path):
+            subdir_path = os.path.join(dir_path, subdir)
+            if os.path.isdir(subdir_path):
+                nested_indicators = [
+                    os.path.join(subdir_path, "var", "log"),
+                    os.path.join(subdir_path, "etc", "passwd"),
+                ]
+                if any(os.path.exists(p) for p in nested_indicators):
+                    return True
+    except PermissionError:
+        pass
+    
+    return any(os.path.exists(p) for p in indicators)
+
+
+# ============================================================================
 # Main Orchestrator
 # ============================================================================
 
@@ -533,7 +598,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     Run all analyzers on the source and output to a unified directory.
     
     Args:
-        source_path: Path to UAC tarball or extracted directory
+        source_path: Path to UAC tarball, extracted directory, or directory containing tarballs
         output_base: Base directory for output (default: current directory)
         parallel: Whether to run analyzers in parallel
         verbose: Whether to print progress
@@ -553,9 +618,53 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     if not os.path.exists(source_path):
         raise FileNotFoundError(f"Source not found: {source_path}")
     
-    # Determine if tarball or directory
-    is_tarball = any(source_path.lower().endswith(ext) 
-                     for ext in ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'))
+    # Determine source type
+    is_tarball = any(source_path.lower().endswith(ext) for ext in TARBALL_EXTENSIONS)
+    
+    # If it's a directory, check if it contains tarballs or is an extracted UAC
+    if not is_tarball and os.path.isdir(source_path):
+        tarballs_found = find_tarballs_in_directory(source_path)
+        is_extracted = is_extracted_uac_directory(source_path)
+        
+        if tarballs_found and not is_extracted:
+            # Directory contains tarballs - run batch analysis
+            if verbose:
+                print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
+                print(f"{Style.HEADER}{Style.BOLD}  Linux Unified Security Analyzer v{__version__}{Style.RESET}", file=sys.stderr)
+                print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
+                print(f"\n{Style.INFO}Found {len(tarballs_found)} tarball(s) in directory:{Style.RESET}", file=sys.stderr)
+                for tb in tarballs_found:
+                    print(f"  - {os.path.basename(tb)}", file=sys.stderr)
+            
+            # Process each tarball
+            all_results = []
+            output_dirs = []
+            for tarball in tarballs_found:
+                if verbose:
+                    print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
+                    print(f"{Style.INFO}Processing:{Style.RESET} {os.path.basename(tarball)}", file=sys.stderr)
+                
+                out_dir, results = run_analysis(
+                    tarball, output_base, parallel, verbose,
+                    memory_path, symbol_dirs, quick_memory
+                )
+                output_dirs.append(out_dir)
+                all_results.extend(results)
+            
+            if verbose:
+                print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
+                print(f"{Style.SUCCESS}Batch analysis complete!{Style.RESET}", file=sys.stderr)
+                print(f"{Style.INFO}Processed {len(tarballs_found)} tarball(s){Style.RESET}", file=sys.stderr)
+                for out_dir in output_dirs:
+                    print(f"  - {out_dir}", file=sys.stderr)
+            
+            return output_dirs[0] if len(output_dirs) == 1 else output_base, all_results
+        
+        elif tarballs_found and is_extracted:
+            # Has both tarballs and extracted content - warn user
+            if verbose:
+                print(f"\n{Style.WARNING}Warning: Directory contains both tarballs and extracted UAC content.{Style.RESET}", file=sys.stderr)
+                print(f"{Style.INFO}Analyzing as extracted directory. To analyze tarballs, specify them directly.{Style.RESET}", file=sys.stderr)
     
     # Extract hostname
     if is_tarball:
@@ -753,9 +862,21 @@ Included Analyzers:
   • Security Analyzer  - Binary/environment security issues
   • Memory Analyzer    - Volatility 3 memory forensics (optional)
 
+Supported Input Types:
+  • UAC tarball (.tar.gz, .tar, .tgz, .tar.bz2, .tar.xz)
+  • Extracted UAC directory
+  • Directory containing multiple tarballs (batch mode)
+  • Live system (use -s /)
+
 Examples:
   # Analyze a UAC tarball
-  python linux_analyzer.py -s hostname.tar.gz
+  python linux_analyzer.py -s uac-hostname-20250115.tar.gz
+  
+  # Analyze an extracted UAC directory
+  python linux_analyzer.py -s ./extracted_uac/
+  
+  # Batch analyze all tarballs in a directory
+  python linux_analyzer.py -s ./collections/
   
   # Analyze with memory dump included
   python linux_analyzer.py -s hostname.tar.gz -m memory.lime --symbols /path/to/symbols
@@ -765,9 +886,6 @@ Examples:
   
   # Run analyzers sequentially (not parallel)
   python linux_analyzer.py -s hostname.tar.gz --sequential
-  
-  # Analyze extracted UAC directory with memory
-  python linux_analyzer.py -s ./extracted_uac/ -m ./memory.lime --symbols ./symbols/
 
 Memory Analysis:
   To include memory analysis, you need:
