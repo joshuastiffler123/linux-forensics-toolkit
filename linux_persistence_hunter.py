@@ -1149,11 +1149,25 @@ class PersistenceHunter:
         """Check systemd timers - extracts ALL timers for review."""
         count = 0
         
+        # System-level timer paths
         timer_paths = [
             "etc/systemd/system/",
             "usr/lib/systemd/system/",
             "lib/systemd/system/",
+            "run/systemd/system/",
+            "etc/systemd/user/",
+            "usr/lib/systemd/user/",
         ]
+        
+        # Also check user-level timers in home directories
+        # These are at ~/.config/systemd/user/
+        home_dirs = self.handler.list_directory("home/")
+        for home_dir in home_dirs:
+            user_timer_path = f"{home_dir}/.config/systemd/user/"
+            timer_paths.append(user_timer_path)
+        
+        # Also check root's user timers
+        timer_paths.append("root/.config/systemd/user/")
         
         for timer_path in timer_paths:
             files = self.handler.list_directory(timer_path)
@@ -1400,12 +1414,25 @@ class PersistenceHunter:
         """Check systemd services - extracts ALL services for review."""
         count = 0
         
+        # System-level service paths
         systemd_paths = [
             "etc/systemd/system/",
             "usr/lib/systemd/system/",
             "lib/systemd/system/",
+            "run/systemd/system/",
             "etc/systemd/user/",
+            "usr/lib/systemd/user/",
         ]
+        
+        # Also check user-level services in home directories
+        # These are at ~/.config/systemd/user/
+        home_dirs = self.handler.list_directory("home/")
+        for home_dir in home_dirs:
+            user_service_path = f"{home_dir}/.config/systemd/user/"
+            systemd_paths.append(user_service_path)
+        
+        # Also check root's user services
+        systemd_paths.append("root/.config/systemd/user/")
         
         for sys_path in systemd_paths:
             files = self.handler.list_directory(sys_path)
