@@ -2591,6 +2591,17 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
     return events
 
 
+HISTORY_PATTERNS = [
+    '.bash_history',
+    '.sh_history', 
+    '.zsh_history',
+    '.history',
+    '.python_history',
+    '.mysql_history',
+    '.psql_history',
+]
+
+
 def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[datetime]]]:
     """
     Find all shell history files in a UAC tarball.
@@ -2602,15 +2613,6 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
         List of tuples: (filepath, username, file_mtime)
     """
     history_files = []
-    history_patterns = [
-        '.bash_history',
-        '.sh_history', 
-        '.zsh_history',
-        '.history',
-        '.python_history',
-        '.mysql_history',
-        '.psql_history',
-    ]
     
     for member in handler._members_cache:
         if member.isdir():
@@ -2620,7 +2622,7 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
         basename = os.path.basename(name)
         
         # Check if this is a history file
-        if basename in history_patterns or basename.endswith('_history'):
+        if basename in HISTORY_PATTERNS or basename.endswith('_history'):
             # Try to extract username from path
             # Typical paths: /root/.bash_history or /home/username/.bash_history
             username = ""
@@ -2641,6 +2643,61 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
                 mtime = None
             
             history_files.append((name, username, mtime))
+    
+    return history_files
+
+
+def find_history_files_in_directory(base_path: str) -> List[Tuple[str, str, Optional[datetime]]]:
+    """
+    Find all shell history files in a directory structure.
+    
+    Searches:
+    - /root/.bash_history (and other history files)
+    - /home/*/.bash_history (and other history files)
+    
+    Args:
+        base_path: Base path to search from
+        
+    Returns:
+        List of tuples: (filepath, username, file_mtime)
+    """
+    history_files = []
+    
+    # Paths to check for history files
+    search_paths = []
+    
+    # Check /root/ directory
+    root_dir = os.path.join(base_path, "root")
+    if os.path.isdir(root_dir):
+        search_paths.append(("root", root_dir))
+    
+    # Check /home/* directories
+    home_dir = os.path.join(base_path, "home")
+    if os.path.isdir(home_dir):
+        try:
+            for username in os.listdir(home_dir):
+                user_home = os.path.join(home_dir, username)
+                if os.path.isdir(user_home):
+                    search_paths.append((username, user_home))
+        except PermissionError:
+            pass
+    
+    # Search each path for history files
+    for username, user_dir in search_paths:
+        try:
+            for item in os.listdir(user_dir):
+                if item in HISTORY_PATTERNS or item.endswith('_history'):
+                    filepath = os.path.join(user_dir, item)
+                    if os.path.isfile(filepath):
+                        # Get file modification time in UTC
+                        try:
+                            mtime = datetime.utcfromtimestamp(os.path.getmtime(filepath))
+                        except (OSError, ValueError, OverflowError):
+                            mtime = None
+                        
+                        history_files.append((filepath, username, mtime))
+        except PermissionError:
+            pass
     
     return history_files
 
@@ -2915,6 +2972,45 @@ class LinuxLoginTimeline:
                     
                     if verbose:
                         print(f"      Found {Style.GREEN}{len(file_events)}{Style.RESET} events", file=sys.stderr)
+                except Exception as e:
+                    print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
+        
+        # Process bash history files (from /root/ and /home/*)
+        if verbose:
+            print(f"\n{Style.INFO}Processing bash_history files...{Style.RESET}", file=sys.stderr)
+        
+        history_files = find_history_files_in_directory(self.source_path)
+        
+        if not history_files:
+            if verbose:
+                print(f"  {Style.DIM}No history files found{Style.RESET}", file=sys.stderr)
+        else:
+            for filepath, username, mtime in history_files:
+                if verbose:
+                    user_info = f" ({username})" if username else ""
+                    print(f"  {Style.SUCCESS}[+] Parsing:{Style.RESET} {os.path.basename(filepath)}{user_info}", file=sys.stderr)
+                
+                try:
+                    file_events = parse_bash_history(
+                        filepath, 
+                        username=username,
+                        file_mtime=mtime
+                    )
+                    
+                    # Only count events with timestamps as "bash_history"
+                    dated_events = [e for e in file_events if e.event_type == "BASH_HISTORY"]
+                    undated_events = [e for e in file_events if e.event_type == "BASH_HISTORY_UNDATED"]
+                    
+                    self.events.extend(file_events)
+                    self.stats["bash_history (dated)"] += len(dated_events)
+                    self.stats["bash_history (undated)"] += len(undated_events)
+                    
+                    if verbose:
+                        if dated_events:
+                            print(f"      Found {Style.GREEN}{len(dated_events)}{Style.RESET} dated commands", file=sys.stderr)
+                        if undated_events:
+                            print(f"      Found {Style.YELLOW}{len(undated_events)}{Style.RESET} undated commands", file=sys.stderr)
+                            
                 except Exception as e:
                     print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
         
