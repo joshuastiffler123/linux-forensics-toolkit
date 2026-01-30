@@ -3861,6 +3861,30 @@ class PersistenceHunter:
         
         print(f"\n{Style.SUCCESS}Total Findings: {len(self.findings)}{Style.RESET}", file=sys.stderr)
     
+    def _get_hostname(self) -> str:
+        """Try to determine hostname from the source."""
+        # Try to read etc/hostname
+        hostname_data = self.handler.get_file("etc/hostname")
+        if hostname_data:
+            try:
+                hostname = hostname_data.decode('utf-8', errors='replace').strip().split('\n')[0]
+                if hostname and len(hostname) < 64:
+                    return hostname
+            except Exception:
+                pass
+        
+        # Fallback to source directory/file name
+        source_name = os.path.basename(self.source_path.rstrip('/\\'))
+        if source_name and source_name != '.' and source_name != '/':
+            # Remove common extensions
+            for ext in ('.tar.gz', '.tgz', '.tar.bz2', '.tar.xz', '.tar'):
+                if source_name.lower().endswith(ext):
+                    source_name = source_name[:-len(ext)]
+                    break
+            return source_name
+        
+        return "unknown"
+    
     def export_csv(self, output_path: str) -> None:
         """Export findings to CSV."""
         if not self.findings:
@@ -3869,7 +3893,8 @@ class PersistenceHunter:
         
         # If output_path is a directory, create a filename inside it
         if os.path.isdir(output_path):
-            filename = f"{self.hostname}_persistence_findings.csv"
+            hostname = self._get_hostname()
+            filename = f"{hostname}_persistence_findings.csv"
             output_path = os.path.join(output_path, filename)
         
         # Ensure parent directory exists
