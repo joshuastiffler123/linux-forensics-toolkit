@@ -3938,15 +3938,24 @@ Version: {__version__}
 This tool detects persistence mechanisms used by attackers, including all
 techniques implemented by PANIX (https://github.com/Aegrah/PANIX).
 
+Supported Input Types (-s/--source):
+  • UAC tarball:        .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz
+  • Extracted directory: Any directory containing Linux filesystem artifacts
+  • Live system:        Use "/" with root privileges
+
+Output (-o):
+  • File path:          Write directly to specified CSV file
+  • Directory path:     Auto-generates [hostname]_persistence_findings.csv
+
 Examples:
   # Hunt for persistence in a UAC tarball
-  python linux_persistence_hunter.py -s hostname.tar.gz -o findings.csv
+  python linux_persistence_hunter.py -s uac-hostname.tar.gz -o findings.csv
   
-  # Hunt in extracted directory
-  python linux_persistence_hunter.py -s ./extracted_uac/ -o findings.csv
+  # Hunt in extracted directory, output to current dir
+  python linux_persistence_hunter.py -s ./extracted_uac/ -o .
   
   # Hunt on live system (requires root)
-  sudo python linux_persistence_hunter.py -s / -o findings.csv
+  sudo python linux_persistence_hunter.py -s / -o /tmp/findings.csv
 
 Detected Techniques (mapped to MITRE ATT&CK):
   - Scheduled Tasks: Cron (T1053.003), At (T1053.002), Systemd Timers

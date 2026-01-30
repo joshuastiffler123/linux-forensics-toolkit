@@ -3287,22 +3287,33 @@ Examples:
   # Batch process all UAC tarballs in a directory
   python linux_login_timeline.py --batch ./extracted_uac/ -o ./timelines/
 
-Supported Input:
-  - UAC (Unix-like Artifacts Collector) tarballs (.tar, .tar.gz, .tgz, .tar.bz2)
-  - Extracted UAC directories
-  - Mounted disk images
-  - Live Linux filesystem
+Supported Input (-s/--source):
+  • UAC tarball:        .tar, .tar.gz, .tgz, .tar.bz2, .tar.xz
+  • Extracted directory: Any directory containing Linux filesystem artifacts  
+  • Mounted disk image: /mnt/evidence/disk1
+  • Live Linux system:  "/" (default, requires appropriate permissions)
 
-Supported log files:
-  - /var/log/btmp*        Failed login attempts (binary)
-  - /var/log/utmp         Current logins (binary)
-  - /var/log/wtmp*        Login history (binary)
-  - /var/log/lastlog      Last login for each user (binary)
-  - /var/log/auth.log*    Authentication logs (Debian/Ubuntu)
-  - /var/log/secure*      Authentication logs (RHEL/CentOS)
-  - /var/log/audit/audit.log*  Audit logs
-  - /var/log/messages*    Syslog messages
-  - /var/log/syslog*      System log
+Output (-o):
+  • File path:          Write directly to specified CSV file
+  • Directory path:     Auto-generates [hostname]_login_timeline.csv
+
+Parsed Log Files:
+  /var/log/btmp*            Failed login attempts (binary)
+  /var/log/utmp             Current logins (binary)
+  /var/log/wtmp*            Login history (binary)
+  /var/log/lastlog          Last login for each user (binary)
+  /var/log/auth.log*        Authentication logs (Debian/Ubuntu)
+  /var/log/secure*          Authentication logs (RHEL/CentOS)
+  /var/log/audit/audit.log* Audit logs
+  /var/log/messages*        Syslog messages
+  /var/log/syslog*          System log
+
+Parsed History Files:
+  /root/.bash_history       Root's command history
+  /root/.zsh_history        Root's zsh history
+  /home/*/.bash_history     User command histories
+  /home/*/.zsh_history      User zsh histories
+  (and other *_history files)
   
 All rotated logs (*.1, *.2, etc.) and gzipped versions (*.gz) are automatically included.
 
