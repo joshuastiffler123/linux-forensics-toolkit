@@ -961,18 +961,25 @@ class PersistenceHunter:
         """Check cron configurations - extracts ALL cron entries for review."""
         count = 0
         
-        cron_paths = [
+        # Crontab-format files (contain time schedules + commands)
+        crontab_paths = [
             "etc/crontab",
             "etc/cron.d/",
-            "etc/cron.daily/",
-            "etc/cron.hourly/",
-            "etc/cron.weekly/",
-            "etc/cron.monthly/",
             "var/spool/cron/",
             "var/spool/cron/crontabs/",
         ]
         
-        for cron_path in cron_paths:
+        # Script directories (contain executable scripts, run by run-parts)
+        # These are NOT crontab format - they're shell scripts
+        script_dirs = {
+            "etc/cron.hourly/": "Hourly",
+            "etc/cron.daily/": "Daily", 
+            "etc/cron.weekly/": "Weekly",
+            "etc/cron.monthly/": "Monthly",
+        }
+        
+        # Process crontab-format files
+        for cron_path in crontab_paths:
             files = self.handler.list_directory(cron_path) if cron_path.endswith('/') else [cron_path]
             
             for filepath in files:
@@ -1011,15 +1018,7 @@ class PersistenceHunter:
                             break
                     
                     # Determine cron type from path
-                    if 'cron.daily' in filepath:
-                        description = f"Daily cron: {description}" if severity != "INFO" else "Daily cron job"
-                    elif 'cron.hourly' in filepath:
-                        description = f"Hourly cron: {description}" if severity != "INFO" else "Hourly cron job"
-                    elif 'cron.weekly' in filepath:
-                        description = f"Weekly cron: {description}" if severity != "INFO" else "Weekly cron job"
-                    elif 'cron.monthly' in filepath:
-                        description = f"Monthly cron: {description}" if severity != "INFO" else "Monthly cron job"
-                    elif 'var/spool/cron' in filepath:
+                    if 'var/spool/cron' in filepath:
                         description = f"User cron: {description}" if severity != "INFO" else "User crontab entry"
                     elif 'cron.d' in filepath:
                         description = f"System cron.d: {description}" if severity != "INFO" else "System cron.d entry"
@@ -1036,6 +1035,59 @@ class PersistenceHunter:
                         raw_content=line[:500]
                     )
                     count += 1
+        
+        # Process script directories (cron.daily, cron.hourly, etc.)
+        # These contain executable scripts, not crontab entries
+        for script_dir, schedule in script_dirs.items():
+            files = self.handler.list_directory(script_dir)
+            
+            for filepath in files:
+                # Get the script name
+                script_name = os.path.basename(filepath)
+                
+                # Skip placeholder files and common non-script files
+                if script_name in ['.placeholder', 'README', '.gitkeep']:
+                    continue
+                
+                # Get first few lines of script for context
+                data = self.handler.get_file(filepath)
+                script_preview = ""
+                if data:
+                    try:
+                        content = data.decode('utf-8', errors='replace')
+                        # Get first non-empty, non-shebang line as preview
+                        for line in content.split('\n')[:10]:
+                            line = line.strip()
+                            if line and not line.startswith('#!') and not line.startswith('#'):
+                                script_preview = line[:100]
+                                break
+                    except Exception:
+                        pass
+                
+                # Check for suspicious patterns in the script
+                severity = "INFO"
+                description = f"{schedule} cron script"
+                
+                if data:
+                    try:
+                        content = data.decode('utf-8', errors='replace')
+                        for pattern, desc in SHELL_BACKDOOR_PATTERNS + CRON_SUSPICIOUS_PATTERNS:
+                            if re.search(pattern, content, re.IGNORECASE):
+                                severity = "HIGH"
+                                description = f"{schedule} cron script - SUSPICIOUS: {desc}"
+                                break
+                    except Exception:
+                        pass
+                
+                self._add_finding(
+                    filepath=filepath,
+                    technique_key="cron",
+                    severity=severity,
+                    description=description,
+                    indicator=f"Script: {script_name}" + (f" | {script_preview}" if script_preview else ""),
+                    raw_content=script_name
+                )
+                count += 1
         
         return count
     
