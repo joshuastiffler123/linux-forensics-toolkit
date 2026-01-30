@@ -1675,11 +1675,21 @@ class JournalAnalyzer:
 # Export Functions
 # ============================================================================
 
-def export_csv(entries: List[JournalEntry], output_path: str, max_message_length: int = None) -> None:
+def export_csv(entries: List[JournalEntry], output_path: str, max_message_length: int = None, hostname: str = "unknown") -> None:
     """Export entries to CSV."""
     if not entries:
         print(f"{Style.WARNING}No entries to export{Style.RESET}", file=sys.stderr)
         return
+    
+    # If output_path is a directory, create a filename inside it
+    if os.path.isdir(output_path):
+        filename = f"{hostname}_journal.csv"
+        output_path = os.path.join(output_path, filename)
+    
+    # Ensure parent directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
     
     fieldnames = ["Timestamp", "Timestamp_Local", "Hostname", "Unit", "Priority", "Category", 
                   "User", "Source_IP", "PID", "UID", "Message", "Source_File"]

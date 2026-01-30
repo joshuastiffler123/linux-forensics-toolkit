@@ -3867,6 +3867,16 @@ class PersistenceHunter:
             print(f"{Style.INFO}No findings to export{Style.RESET}", file=sys.stderr)
             return
         
+        # If output_path is a directory, create a filename inside it
+        if os.path.isdir(output_path):
+            filename = f"{self.hostname}_persistence_findings.csv"
+            output_path = os.path.join(output_path, filename)
+        
+        # Ensure parent directory exists
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             fieldnames = ["Filepath", "Technique", "MITRE_ATT&CK_ID", "Severity",
                          "Description", "Indicator", "Line_Number", "Raw_Content",
