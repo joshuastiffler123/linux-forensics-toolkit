@@ -1064,9 +1064,12 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
     
     try:
         # Get list of users from passwd
+        # IMPORTANT: For forensic safety we ONLY use passwd data
+        # supplied from the target source (tarball/directory). We do
+        # NOT fall back to the analyst host's /etc/passwd, to avoid
+        # contaminating timelines with live-system information.
         users = {}
         
-        # Try to parse provided passwd data first
         if passwd_data:
             try:
                 passwd_text = passwd_data.decode('utf-8', errors='replace')
@@ -1075,18 +1078,8 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                     if len(parts) >= 3:
                         users[int(parts[2])] = parts[0]
             except Exception:
-                pass
-        
-        # Fall back to local passwd
-        if not users:
-            try:
-                with open("/etc/passwd", "r") as f:
-                    for line in f:
-                        parts = line.strip().split(":")
-                        if len(parts) >= 3:
-                            users[int(parts[2])] = parts[0]
-            except Exception:
-                # If we can't read passwd, we'll use UID as username
+                # If username resolution fails, we'll fall back to UID
+                # values below when creating events.
                 pass
         
         with open_file(filepath, binary=True, data=data) as f:
@@ -3325,7 +3318,7 @@ from your current working directory. Uses Python standard library only (no pip i
     parser.add_argument(
         "-s", "--source",
         default="/",
-        help="Source path: UAC tarball (.tar, .tar.gz), extracted directory, or '/' for live system"
+        help="Source path: UAC tarball (.tar, .tar.gz) or extracted directory. Use '/' ONLY with --allow-live to analyze the current system."
     )
     
     # Keep -b as alias for backwards compatibility
@@ -3366,6 +3359,12 @@ from your current working directory. Uses Python standard library only (no pip i
     )
     
     parser.add_argument(
+        "--allow-live",
+        action="store_true",
+        help="Allow using '/' as source to analyze the live system (not recommended for forensics)"
+    )
+    
+    parser.add_argument(
         "--batch",
         metavar="DIR",
         help="Batch mode: process all UAC tarballs in specified directory"
@@ -3402,6 +3401,14 @@ from your current working directory. Uses Python standard library only (no pip i
     source_path = args.source
     if source_path != "/":
         source_path = resolve_path(source_path)
+    else:
+        # By default, refuse to analyze the live system '/' to avoid
+        # contaminating forensic results with host artifacts. Users
+        # must explicitly opt in with --allow-live.
+        if not getattr(args, "allow_live", False):
+            print(f"{Style.ERROR}Refusing to use '/' as source without --allow-live (to protect forensic integrity).{Style.RESET}", file=sys.stderr)
+            print(f"{Style.INFO}Hint:{Style.RESET} Specify a tarball or extracted directory with -s/--source, or add --allow-live if you really intend to analyze this host.", file=sys.stderr)
+            return 1
     
     # Validate source exists
     if source_path != "/" and not os.path.exists(source_path):
