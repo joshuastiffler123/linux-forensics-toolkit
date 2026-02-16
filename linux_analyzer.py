@@ -6,14 +6,18 @@ Runs all Linux forensic analysis tools in parallel and outputs
 results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
-- linux_login_timeline.py    - Login/authentication timeline
-- linux_journal_analyzer.py  - Systemd journal analysis
-- linux_persistence_hunter.py - Persistence mechanism detection
-- linux_security_analyzer.py  - Binary/environment security analysis
-- linux_memory_analyzer.py   - Memory forensics (optional, requires memory dump)
+- linux_login_timeline.py       - Login/authentication timeline
+- linux_journal_analyzer.py     - Systemd journal analysis
+- linux_persistence_hunter.py   - Persistence mechanism detection
+- linux_security_analyzer.py    - Binary/environment security analysis
+- linux_filesystem_timeline.py  - Filesystem timeline (bodyfile/mactime)
+- linux_string_analyzer.py      - Log carving & string extraction
+- linux_misc_artifacts.py       - Archive files, hidden dirs, scheduled tasks
+- linux_ioc_scanner.py          - IOC string matching (optional, requires IOC file)
+- linux_memory_analyzer.py      - Memory forensics (optional, requires memory dump)
 
 Author: Security Tools
-Version: 1.1.0
+Version: 2.0.0
 License: MIT
 
 Requirements: Python 3.6+ (standard library only)
@@ -34,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 
 
 # ============================================================================
@@ -450,6 +454,159 @@ def run_memory_analyzer(memory_path: str, output_dir: str, hostname: str,
     return result
 
 
+def run_filesystem_timeline(source_path: str, output_dir: str, hostname: str) -> Dict:
+    """Run the filesystem timeline generator."""
+    result = {
+        "name": "Filesystem Timeline",
+        "success": False,
+        "output_files": [],
+        "event_count": 0,
+        "error": None
+    }
+
+    try:
+        import linux_filesystem_timeline as lft
+
+        gen = lft.FilesystemTimelineGenerator(source_path)
+        try:
+            gen.generate(verbose=False)
+
+            # Export bodyfile
+            bf_path = os.path.join(output_dir, f"{hostname}_bodyfile.txt")
+            gen.export_bodyfile(bf_path)
+            result["output_files"].append(bf_path)
+
+            # Export full timeline CSV
+            tl_path = os.path.join(output_dir, f"{hostname}_filesystem_timeline.csv")
+            gen.export_timeline_csv(tl_path)
+            result["output_files"].append(tl_path)
+
+            # Export merged login timeline
+            if gen.login_entries:
+                login_path = os.path.join(output_dir, f"{hostname}_login_timeline_merged.csv")
+                gen.export_login_csv(login_path)
+                result["output_files"].append(login_path)
+
+            result["event_count"] = len(gen.bodyfile_entries) + len(gen.login_entries)
+            result["success"] = True
+        finally:
+            gen.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def run_string_analyzer(source_path: str, output_dir: str, hostname: str) -> Dict:
+    """Run the string/log extraction analyzer."""
+    result = {
+        "name": "String Analyzer",
+        "success": False,
+        "output_files": [],
+        "event_count": 0,
+        "finding_count": 0,
+        "error": None
+    }
+
+    try:
+        import linux_string_analyzer as lsa_str
+
+        analyzer = lsa_str.StringAnalyzer(source_path)
+        try:
+            counts = analyzer.analyze(verbose=False)
+
+            files = analyzer.export_csv(output_dir, hostname)
+            result["output_files"] = files
+
+            total = sum(v for k, v in counts.items() if k != 'security_total')
+            result["event_count"] = total
+            result["finding_count"] = counts.get('security_total', 0)
+            result["success"] = True
+        finally:
+            analyzer.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def run_misc_artifacts(source_path: str, output_dir: str, hostname: str) -> Dict:
+    """Run the miscellaneous artifacts collector."""
+    result = {
+        "name": "Misc Artifacts",
+        "success": False,
+        "output_files": [],
+        "finding_count": 0,
+        "error": None
+    }
+
+    try:
+        import linux_misc_artifacts as lma_misc
+
+        collector = lma_misc.MiscArtifactsCollector(source_path)
+        try:
+            counts = collector.collect(verbose=False)
+
+            files = collector.export_csv(output_dir, hostname)
+            result["output_files"] = files
+            result["finding_count"] = sum(counts.values())
+            result["success"] = True
+        finally:
+            collector.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
+def run_ioc_scanner(source_path: str, output_dir: str, hostname: str,
+                    ioc_file: str = None) -> Dict:
+    """Run the IOC scanner."""
+    result = {
+        "name": "IOC Scanner",
+        "success": False,
+        "output_files": [],
+        "finding_count": 0,
+        "error": None
+    }
+
+    if not ioc_file:
+        result["error"] = "No IOC file specified"
+        result["success"] = True  # Not a failure, just not requested
+        return result
+
+    if not os.path.isfile(ioc_file):
+        result["error"] = f"IOC file not found: {ioc_file}"
+        return result
+
+    try:
+        import linux_ioc_scanner as lis
+
+        scanner = lis.IOCScanner(source_path, ioc_file)
+        try:
+            total = scanner.scan(verbose=False)
+
+            # Also scan the output directory for hits in analysis results
+            scanner.scan_output_directory(output_dir, verbose=False)
+
+            path = scanner.export_csv(output_dir, hostname)
+            if path:
+                result["output_files"].append(path)
+
+            result["finding_count"] = len(scanner.matches)
+            result["success"] = True
+        finally:
+            scanner.close()
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 # ============================================================================
 # Correlation and Summary
 # ============================================================================
@@ -592,11 +749,12 @@ def is_extracted_uac_directory(dir_path: str) -> bool:
 # ============================================================================
 
 def run_analysis(source_path: str, output_base: str = None, parallel: bool = True,
-                verbose: bool = True, memory_path: str = None, 
-                symbol_dirs: List[str] = None, quick_memory: bool = False) -> Tuple[str, List[Dict]]:
+                verbose: bool = True, memory_path: str = None,
+                symbol_dirs: List[str] = None, quick_memory: bool = False,
+                ioc_file: str = None) -> Tuple[str, List[Dict]]:
     """
     Run all analyzers on the source and output to a unified directory.
-    
+
     Args:
         source_path: Path to UAC tarball, extracted directory, or directory containing tarballs
         output_base: Base directory for output (default: current directory)
@@ -605,7 +763,8 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         memory_path: Optional path to memory dump for memory analysis
         symbol_dirs: Optional list of symbol directories for memory analysis
         quick_memory: Run quick memory triage instead of full analysis
-    
+        ioc_file: Optional path to IOC file for IOC scanning
+
     Returns:
         Tuple of (output_directory, results_list)
     """
@@ -646,7 +805,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 
                 out_dir, results = run_analysis(
                     tarball, output_base, parallel, verbose,
-                    memory_path, symbol_dirs, quick_memory
+                    memory_path, symbol_dirs, quick_memory, ioc_file
                 )
                 output_dirs.append(out_dir)
                 all_results.extend(results)
@@ -694,6 +853,9 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         ("Journal Analyzer", run_journal_analyzer),
         ("Persistence Hunter", run_persistence_hunter),
         ("Security Analyzer", run_security_analyzer),
+        ("Filesystem Timeline", run_filesystem_timeline),
+        ("String Analyzer", run_string_analyzer),
+        ("Misc Artifacts", run_misc_artifacts),
     ]
     
     results = []
@@ -795,8 +957,39 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             if verbose:
                 print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {e}{Style.RESET}", file=sys.stderr)
     
+    # Run IOC scanner if IOC file provided (runs last to also scan analysis output)
+    if ioc_file:
+        if verbose:
+            print(f"\n{Style.INFO}Running IOC Scanner...{Style.RESET}", file=sys.stderr)
+            print(f"  {Style.DIM}IOC File: {ioc_file}{Style.RESET}", file=sys.stderr)
+
+        try:
+            ioc_result = run_ioc_scanner(
+                source_path=source_path,
+                output_dir=output_dir,
+                hostname=hostname,
+                ioc_file=ioc_file
+            )
+            results.append(ioc_result)
+
+            if verbose:
+                if ioc_result["success"]:
+                    count_str = f" ({ioc_result['finding_count']} matches)" if ioc_result.get('finding_count') else ""
+                    print(f"  {Style.SUCCESS}[OK] IOC Scanner{count_str}{Style.RESET}", file=sys.stderr)
+                else:
+                    print(f"  {Style.ERROR}[FAILED] IOC Scanner: {ioc_result.get('error', 'Unknown error')}{Style.RESET}", file=sys.stderr)
+        except Exception as e:
+            results.append({
+                "name": "IOC Scanner",
+                "success": False,
+                "output_files": [],
+                "error": str(e)
+            })
+            if verbose:
+                print(f"  {Style.ERROR}[FAILED] IOC Scanner: {e}{Style.RESET}", file=sys.stderr)
+
     end_time = datetime.now()
-    
+
     # Create summary report
     if verbose:
         print(f"\n{Style.INFO}Creating summary report...{Style.RESET}", file=sys.stderr)
@@ -856,11 +1049,15 @@ This script runs all Linux forensic analysis tools in parallel and outputs
 results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
-  • Login Timeline     - Authentication/login events from logs
-  • Journal Analyzer   - Systemd journal entries
-  • Persistence Hunter - MITRE ATT&CK mapped persistence mechanisms
-  • Security Analyzer  - Binary/environment security issues
-  • Memory Analyzer    - Volatility 3 memory forensics (optional)
+  • Login Timeline       - Authentication/login events from logs
+  • Journal Analyzer     - Systemd journal entries
+  • Persistence Hunter   - MITRE ATT&CK mapped persistence mechanisms
+  • Security Analyzer    - Binary/environment security issues
+  • Filesystem Timeline  - Bodyfile/mactime filesystem timeline generation
+  • String Analyzer      - Log carving & string extraction (audit, syslog, web)
+  • Misc Artifacts       - Archive files, hidden dirs, scheduled tasks
+  • IOC Scanner          - IOC string matching (optional, requires -i flag)
+  • Memory Analyzer      - Volatility 3 memory forensics (optional)
 
 Supported Input Types:
   • UAC tarball (.tar.gz, .tar, .tgz, .tar.bz2, .tar.xz)
@@ -871,41 +1068,60 @@ Supported Input Types:
 Examples:
   # Analyze a UAC tarball
   python linux_analyzer.py -s uac-hostname-20250115.tar.gz
-  
+
   # Analyze an extracted UAC directory
   python linux_analyzer.py -s ./extracted_uac/
-  
+
   # Batch analyze all tarballs in a directory
   python linux_analyzer.py -s ./collections/
-  
+
+  # Analyze with IOC scanning
+  python linux_analyzer.py -s hostname.tar.gz -i iocs.txt
+
   # Analyze with memory dump included
   python linux_analyzer.py -s hostname.tar.gz -m memory.lime --symbols /path/to/symbols
-  
+
   # Analyze to specific output directory
   python linux_analyzer.py -s hostname.tar.gz -o ./analysis_results/
-  
+
   # Run analyzers sequentially (not parallel)
   python linux_analyzer.py -s hostname.tar.gz --sequential
+
+IOC Scanning:
+  Provide a text file with one IOC string per line (fixed strings, not regex).
+  Lines starting with '#' are treated as comments.
+  The scanner searches all log files, configs, histories, and analysis output.
 
 Memory Analysis:
   To include memory analysis, you need:
   1. A memory dump file (.lime, .raw, etc.)
   2. Matching symbol files for the kernel
-  
+
   First-time setup: python linux_memory_analyzer.py --setup
   Identify kernel:  python linux_memory_analyzer.py -i memory.lime --banner
 
 Output:
   Creates directory: [hostname]_analysis/
-  
+
   Files generated:
-    [hostname]_login_timeline.csv       - Login/auth events
-    [hostname]_journal.csv              - Journal entries  
-    [hostname]_journal_security.csv     - Security-relevant journal entries
-    [hostname]_persistence.csv          - ALL scheduled tasks + persistence findings
-    [hostname]_security_*.csv           - Security analyzer findings
-    [hostname]_analysis_summary.txt     - Summary report
-    memory_analysis/*.csv               - Memory forensics results (if -m provided)
+    [hostname]_login_timeline.csv              - Login/auth events
+    [hostname]_journal.csv                     - Journal entries
+    [hostname]_journal_security.csv            - Security-relevant journal entries
+    [hostname]_persistence.csv                 - ALL scheduled tasks + persistence findings
+    [hostname]_security_*.csv                  - Security analyzer findings
+    [hostname]_bodyfile.txt                    - Raw bodyfile (mactime format)
+    [hostname]_filesystem_timeline.csv         - Full filesystem timeline CSV
+    [hostname]_login_timeline_merged.csv       - Merged login events from all sources
+    [hostname]_audit_logs.csv                  - Extracted audit log entries
+    [hostname]_syslog_extracted.csv            - Extracted syslog entries
+    [hostname]_web_logs.csv                    - Extracted web server logs
+    [hostname]_security_events_extracted.csv   - All security-relevant log entries
+    [hostname]_archive_files.csv               - Archive files found
+    [hostname]_hidden_directories.csv          - Hidden directories
+    [hostname]_scheduled_tasks.csv             - Cron, systemd timer, at job configs
+    [hostname]_ioc_matches.csv                 - IOC matches (if -i provided)
+    [hostname]_analysis_summary.txt            - Summary report
+    memory_analysis/*.csv                      - Memory forensics results (if -m provided)
         """
     )
     
@@ -933,6 +1149,13 @@ Output:
         help='Suppress progress output'
     )
     
+    # IOC scanning options
+    parser.add_argument(
+        '-i', '--iocs',
+        default=None,
+        help='Path to IOC file (one string per line) for IOC scanning'
+    )
+
     # Memory analysis options
     parser.add_argument(
         '-m', '--memory',
@@ -969,12 +1192,18 @@ Output:
         print(f"{Style.ERROR}Error: Source not found: {source_path}{Style.RESET}", file=sys.stderr)
         sys.exit(1)
     
+    # Resolve IOC file path if provided
+    ioc_file = os.path.abspath(args.iocs) if args.iocs else None
+    if ioc_file and not os.path.isfile(ioc_file):
+        print(f"{Style.ERROR}Error: IOC file not found: {ioc_file}{Style.RESET}", file=sys.stderr)
+        sys.exit(1)
+
     # Resolve memory path if provided
     memory_path = os.path.abspath(args.memory) if args.memory else None
     if memory_path and not os.path.exists(memory_path):
         print(f"{Style.ERROR}Error: Memory image not found: {memory_path}{Style.RESET}", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         output_dir, results = run_analysis(
             source_path=source_path,
@@ -983,7 +1212,8 @@ Output:
             verbose=not args.quiet,
             memory_path=memory_path,
             symbol_dirs=args.symbols if args.symbols else None,
-            quick_memory=args.quick_memory
+            quick_memory=args.quick_memory,
+            ioc_file=ioc_file
         )
         
         # Exit with error code if any analyzer failed completely
