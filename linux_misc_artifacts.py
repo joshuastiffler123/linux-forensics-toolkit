@@ -410,10 +410,11 @@ class MiscArtifactsCollector:
                     'path': '/' + rel,
                     'type': task_type,
                     'size': member.size,
-                    'content': content[:4096],  # Limit content size
+                    'content': content,  # Store full content for raw export
                     'mtime': datetime.fromtimestamp(
                         member.mtime, tz=timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ") if member.mtime else ""
+                        "%Y-%m-%dT%H:%M:%SZ") if member.mtime else "",
+                    'exported_file': ""
                 })
                 count += 1
         else:
@@ -432,7 +433,7 @@ class MiscArtifactsCollector:
                     content = ""
                     try:
                         with open(fpath, 'r', errors='replace') as f:
-                            content = f.read(4096)
+                            content = f.read()  # Read full content for raw export
                     except (OSError, PermissionError):
                         pass
 
@@ -451,7 +452,8 @@ class MiscArtifactsCollector:
                         'type': task_type,
                         'size': size,
                         'content': content,
-                        'mtime': mtime
+                        'mtime': mtime,
+                        'exported_file': ""
                     })
                     count += 1
 
@@ -560,17 +562,70 @@ class MiscArtifactsCollector:
 
         # Scheduled tasks
         if self.scheduled_tasks:
-            path = os.path.join(output_dir, f"{hostname}_scheduled_tasks.csv")
+            # Export full raw scheduled task files to a subdirectory
+            raw_dir = os.path.join(output_dir, "raw_scheduled_tasks")
+            os.makedirs(raw_dir, exist_ok=True)
+            RAW_CONTENT_THRESHOLD = 500  # chars
+
+            for entry in self.scheduled_tasks:
+                content = entry.get('content', '')
+                if not content:
+                    continue
+
+                # Sanitize path into a safe filename
+                safe_name = entry['path'].replace('/', '_').replace(
+                    '\\', '_').lstrip('_')
+                if not safe_name:
+                    safe_name = 'unknown_task'
+                export_path = os.path.join(raw_dir, safe_name)
+
+                # Handle duplicate filenames
+                if os.path.exists(export_path):
+                    base, ext = os.path.splitext(export_path)
+                    counter = 1
+                    while os.path.exists(f"{base}_{counter}{ext}"):
+                        counter += 1
+                    export_path = f"{base}_{counter}{ext}"
+
+                try:
+                    with open(export_path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    entry['exported_file'] = export_path
+                except OSError:
+                    pass
+
+            exported_count = sum(1 for e in self.scheduled_tasks
+                                if e.get('exported_file'))
+            if exported_count:
+                print(f"  {Style.INFO}[+] Exported {exported_count} raw "
+                      f"scheduled task file(s) to: {raw_dir}{Style.RESET}",
+                      file=sys.stderr)
+
+            # Write CSV with Exported_File column
+            path = os.path.join(output_dir,
+                                f"{hostname}_scheduled_tasks.csv")
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['Path', 'Type', 'Size', 'Modified',
-                                 'Content Preview'])
+                                 'Content Preview', 'Exported_File'])
                 for entry in sorted(self.scheduled_tasks,
                                     key=lambda e: e['path']):
-                    # Truncate content for CSV readability
-                    preview = entry['content'][:500].replace('\n', ' | ')
+                    content = entry.get('content', '')
+                    exported = entry.get('exported_file', '')
+
+                    # If content is too large, truncate and reference export
+                    if len(content) > RAW_CONTENT_THRESHOLD and exported:
+                        preview = (
+                            f"[Content too large for CSV - see "
+                            f"Exported_File for full contents] "
+                            f"{content[:200].replace(chr(10), ' | ')}..."
+                        )
+                    else:
+                        preview = content[:500].replace('\n', ' | ')
+
                     writer.writerow([entry['path'], entry['type'],
-                                     entry['size'], entry['mtime'], preview])
+                                     entry['size'], entry['mtime'],
+                                     preview, exported])
             output_files.append(path)
 
         return output_files

@@ -133,8 +133,16 @@ class PersistenceFinding:
     hash_sha256: str = ""
     file_mode: str = ""
     extra_info: Dict = field(default_factory=dict)
-    
+    exported_file: str = ""  # Path to exported raw file when content is too large
+
     def to_dict(self) -> Dict:
+        raw = self.raw_content
+        # If content was exported to a file, truncate and point to exported location
+        if self.exported_file:
+            raw = (f"[Content exported - see Exported_File column] "
+                   f"{raw[:200]}..." if len(raw) > 200 else raw)
+        else:
+            raw = raw[:1000] if raw else ""
         return {
             "Filepath": self.filepath,
             "Technique": self.technique,
@@ -143,11 +151,12 @@ class PersistenceFinding:
             "Description": self.description,
             "Indicator": self.indicator[:500] if self.indicator else "",
             "Line_Number": self.line_number,
-            "Raw_Content": self.raw_content[:1000] if self.raw_content else "",
+            "Raw_Content": raw,
             "MD5": self.hash_md5,
             "SHA256": self.hash_sha256,
             "File_Mode": self.file_mode,
-            "Extra_Info": str(self.extra_info) if self.extra_info else ""
+            "Extra_Info": str(self.extra_info) if self.extra_info else "",
+            "Exported_File": self.exported_file
         }
 
 
@@ -3885,40 +3894,122 @@ class PersistenceHunter:
         
         return "unknown"
     
+    def _export_raw_scheduled_tasks(self, output_dir: str) -> int:
+        """
+        Export full raw contents of scheduled task files to a subdirectory.
+
+        When a scheduled task file (cron, at job, systemd timer/service) has
+        content that is too large for the CSV, the full file is written to
+        ``<output_dir>/raw_scheduled_tasks/`` and the finding's
+        ``exported_file`` field is updated so the CSV can reference it.
+
+        Args:
+            output_dir: Base output directory for the analysis run.
+
+        Returns:
+            Number of files exported.
+        """
+        # MITRE technique IDs for scheduled tasks and systemd services
+        SCHED_TECHNIQUE_IDS = frozenset({
+            "T1053.002",  # At jobs
+            "T1053.003",  # Cron
+            "T1053.006",  # Systemd Timers
+            "T1543.002",  # Systemd Services
+        })
+
+        # Collect unique filepaths from scheduled-task findings
+        sched_filepaths: Set[str] = set()
+        for finding in self.findings:
+            if finding.technique_id in SCHED_TECHNIQUE_IDS:
+                sched_filepaths.add(finding.filepath)
+
+        if not sched_filepaths:
+            return 0
+
+        raw_dir = os.path.join(output_dir, "raw_scheduled_tasks")
+        os.makedirs(raw_dir, exist_ok=True)
+        exported = 0
+
+        for filepath in sorted(sched_filepaths):
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+
+            # Always export the full file regardless of size
+            # Sanitize the filepath for use as a filename
+            safe_name = filepath.replace('/', '_').replace('\\', '_').lstrip('_')
+            if not safe_name:
+                safe_name = "unknown_task"
+            export_path = os.path.join(raw_dir, safe_name)
+
+            # Handle duplicate filenames
+            if os.path.exists(export_path):
+                base, ext = os.path.splitext(export_path)
+                counter = 1
+                while os.path.exists(f"{base}_{counter}{ext}"):
+                    counter += 1
+                export_path = f"{base}_{counter}{ext}"
+
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            exported += 1
+
+            # Update findings that reference this file
+            for finding in self.findings:
+                if finding.filepath == filepath and \
+                        finding.technique_id in SCHED_TECHNIQUE_IDS:
+                    finding.exported_file = export_path
+
+        return exported
+
     def export_csv(self, output_path: str) -> None:
-        """Export findings to CSV."""
+        """Export findings to CSV and raw scheduled task files to subdirectory."""
         if not self.findings:
             print(f"{Style.INFO}No findings to export{Style.RESET}", file=sys.stderr)
             return
-        
+
         # If output_path is a directory, create a filename inside it
         if os.path.isdir(output_path):
             hostname = self._get_hostname()
             filename = f"{hostname}_persistence_findings.csv"
             output_path = os.path.join(output_path, filename)
-        
+
         # Ensure parent directory exists
         output_dir = os.path.dirname(output_path)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
-        
+
+        # Export full raw scheduled task files before writing CSV
+        if output_dir:
+            exported_count = self._export_raw_scheduled_tasks(output_dir)
+            if exported_count > 0:
+                print(f"{Style.INFO}Exported {exported_count} raw scheduled task "
+                      f"file(s) to: {os.path.join(output_dir, 'raw_scheduled_tasks')}"
+                      f"{Style.RESET}", file=sys.stderr)
+
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             fieldnames = ["Filepath", "Technique", "MITRE_ATT&CK_ID", "Severity",
                          "Description", "Indicator", "Line_Number", "Raw_Content",
-                         "MD5", "SHA256", "File_Mode", "Extra_Info"]
+                         "MD5", "SHA256", "File_Mode", "Extra_Info",
+                         "Exported_File"]
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            
+
             # Sort by severity, then technique
             severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
-            
+
             for finding in sorted(self.findings, key=lambda x: (
                 severity_order.get(x.severity, 5),
                 x.technique,
                 x.filepath
             )):
                 writer.writerow(finding.to_dict())
-        
+
         print(f"{Style.SUCCESS}Findings exported to:{Style.RESET} {output_path}", file=sys.stderr)
 
 

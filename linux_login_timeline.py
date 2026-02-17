@@ -793,85 +793,186 @@ INVALID_USERNAME_WORDS = frozenset([
     # Common log message words that get incorrectly captured
     'runtime', 'manager', 'message', 'slice', 'target', 'methods',
     'session', 'service', 'system', 'scope', 'socket', 'mount', 'path',
-    'device', 'timer', 'swap', 'snapshot', 'automount',
+    'device', 'timer', 'swap', 'snapshot', 'automount', 'unit', 'group',
+    'process', 'child', 'worker', 'thread', 'client', 'server', 'host',
+    'entry', 'record', 'event', 'request', 'response', 'result',
+    'source', 'type', 'mode', 'state', 'status', 'level', 'action',
+    'config', 'option', 'value', 'default', 'unknown', 'invalid',
+    'data', 'file', 'directory', 'link', 'node', 'object',
     # Systemd-related
     'systemd', 'logind', 'journald', 'udevd', 'networkd', 'resolved',
     'timesyncd', 'tmpfiles', 'sysusers', 'modules', 'generators',
+    'multi', 'basic', 'sysinit', 'rescue', 'emergency', 'poweroff',
+    'reboot', 'halt', 'shutdown', 'suspend', 'hibernate',
+    # Daemon/service process names (NOT the system user accounts they run as)
+    # Note: names like 'postgres', 'redis', 'mysql', 'www-data', 'nginx',
+    # 'nobody', 'syslog' etc. are REAL user accounts and should NOT be here
+    'sshd', 'crond', 'atd', 'httpd', 'mysqld',
+    'polkitd', 'udisks', 'accounts',
+    'rsyslogd', 'syslogd', 'auditd', 'firewalld', 'iptables',
+    'ntpd', 'chronyd', 'named', 'dhcpd', 'dhclient', 'smbd', 'nmbd',
+    'sssd', 'nscd', 'nslcd', 'winbindd', 'realmd', 'certmonger',
+    'libvirtd', 'virtlogd', 'virtlockd', 'containerd',
+    # PAM module names that get captured as usernames
+    'pam_unix', 'pam_succeed_if', 'pam_systemd', 'pam_keyinit',
+    'pam_limits', 'pam_loginuid', 'pam_env', 'pam_permit',
+    'pam_deny', 'pam_securetty', 'pam_nologin', 'pam_selinux',
+    'pam_namespace', 'pam_console', 'pam_access', 'pam_time',
+    'pam_cracklib', 'pam_pwquality', 'pam_faillock', 'pam_tally',
+    'pam_wheel', 'pam_xauth', 'pam_motd', 'pam_mail', 'pam_lastlog',
     # Command words/fragments
     'command', 'continued', 'starting', 'started', 'stopping', 'stopped',
     'failed', 'success', 'error', 'warning', 'info', 'debug', 'notice',
     'reached', 'listening', 'running', 'exited', 'killed', 'finished',
-    # Common false positives
+    'loaded', 'unloaded', 'mounted', 'unmounted', 'activated', 'deactivated',
+    'enabled', 'disabled', 'created', 'removed', 'changed', 'modified',
+    'opened', 'closed', 'received', 'sent', 'read', 'written',
+    'acquired', 'released', 'granted', 'revoked', 'expired', 'renewed',
+    'logged', 'detected', 'resolved', 'timeout', 'retrying',
+    'initializing', 'initialized', 'terminating', 'terminated',
+    'authenticating', 'authenticated', 'authorized', 'unauthorized',
+    'succeeded', 'successful', 'unsuccessful', 'complete', 'completed',
+    'pending', 'queued', 'processing', 'processed',
+    # Common false positives from log format fragments
     'the', 'for', 'from', 'with', 'and', 'not', 'was', 'has', 'had',
     'new', 'old', 'all', 'any', 'none', 'null', 'true', 'false',
+    'yes', 'no', 'on', 'off', 'by', 'in', 'to', 'as', 'of', 'at',
+    'via', 'per', 'key', 'set', 'get', 'put', 'add', 'del', 'try',
     # Networking terms
     'port', 'address', 'connection', 'connected', 'disconnected',
     'accepted', 'rejected', 'denied', 'allowed', 'blocked',
+    'tcp', 'udp', 'icmp', 'interface', 'bridge', 'tunnel',
+    'forwarding', 'routing', 'binding', 'bound', 'packet',
+    # Security/auth terms that appear as values
+    'password', 'publickey', 'keyboard', 'interactive', 'challenge',
+    'certificate', 'credential', 'token', 'ticket', 'login', 'logout',
+    'preauth', 'postauth', 'auth', 'authentication', 'authorization',
+    'acct', 'accounting', 'audit', 'selinux', 'apparmor',
+    # Syslog facility/priority names
+    'emerg', 'alert', 'crit', 'err', 'warn', 'note', 'informational',
+    # Common non-user strings that pass the regex but aren't real users
+    'localhost', 'loopback', 'nogroup', 'nouser', 'nologin', 'nobody_',
+    'unset', 'undefined', 'empty', 'missing', 'unavailable',
 ])
+
+# Regex for strings that look like hex values, UUIDs, or session IDs (not usernames)
+_HEX_LIKE_PATTERN = re.compile(r'^[0-9a-fA-F]{6,}$')
+_UUID_LIKE_PATTERN = re.compile(r'^[0-9a-fA-F]{8}[-_][0-9a-fA-F]{4}')
+_SESSION_ID_PATTERN = re.compile(r'^(?:c\d+|session-\d+|\d+)$', re.IGNORECASE)
+# Strings that are purely numeric or look like PIDs/ports
+_NUMERIC_LIKE_PATTERN = re.compile(r'^\d[\d_.-]*$')
+# systemd unit-like strings (e.g., "user-1000", "session-42")
+_SYSTEMD_UNIT_PATTERN = re.compile(r'^(?:user|session|seat|slice|scope|service|timer|mount|socket|device|swap|target|path|automount)-', re.IGNORECASE)
 
 
 def is_valid_username(username: str) -> bool:
     """
     Check if a string looks like a valid Linux username.
-    
+
     This helps filter out false positives from log parsing where
-    command arguments or log message words are incorrectly captured.
-    
+    command arguments, log message words, daemon names, hex strings,
+    or session IDs are incorrectly captured as usernames.
+
     Args:
         username: Potential username string
-        
+
     Returns:
         True if it looks like a valid username
     """
     if not username:
         return False
-    
+
     # Strip common trailing punctuation from log parsing
     username = username.rstrip(',:;)>]}"\'')
-    
+
     if not username:
         return False
-    
+
     # Reject if it starts with a dash (command flag like -o, --help)
     if username.startswith('-'):
         return False
-    
+
     # Reject if it starts with a slash (path)
     if username.startswith('/'):
         return False
-    
+
     # Reject if it starts with a digit (unlikely username, probably a number)
     if username[0].isdigit():
         return False
-    
+
     # Reject if it contains path separators
     if '/' in username or '\\' in username:
         return False
-    
+
     # Reject if it contains equals (likely key=value)
     if '=' in username:
         return False
-    
-    # Reject if it contains parentheses or brackets
-    if any(c in username for c in '()[]{}'):
+
+    # Reject if it contains parentheses, brackets, or other non-username chars
+    if any(c in username for c in '()[]{}@#$%^&*+~`|<>'):
         return False
-    
+
+    # Reject if it contains dots (likely a hostname, FQDN, or file extension)
+    if '.' in username:
+        return False
+
+    # Reject if it contains colons (likely a timestamp, port spec, or key:value)
+    if ':' in username:
+        return False
+
     # Reject known non-username words (case-insensitive)
-    if username.lower() in INVALID_USERNAME_WORDS:
+    lower = username.lower()
+    if lower in INVALID_USERNAME_WORDS:
         return False
-    
+
     # Reject if too long (Linux max is 32)
     if len(username) > 32:
         return False
-    
+
     # Reject if too short and not a common short username
-    if len(username) == 1 and username.lower() not in ('r', 's', 'u'):  # rare but possible
+    if len(username) == 1:
         return False
-    
-    # Check against valid username pattern
+
+    # Reject 2-char strings that aren't well-known users
+    if len(username) == 2 and lower not in ('lp', 'at', 'ir'):
+        return False
+
+    # Check against valid username pattern (must start with letter or underscore)
     if not VALID_USERNAME_PATTERN.match(username):
         return False
-    
+
+    # Reject hex-like strings (e.g., "a1b2c3d4", "deadbeef")
+    if _HEX_LIKE_PATTERN.match(username):
+        return False
+
+    # Reject UUID-like strings (e.g., "550e8400-e29b-...")
+    if _UUID_LIKE_PATTERN.match(username):
+        return False
+
+    # Reject session/unit ID strings (e.g., "c42", "session-7")
+    if _SESSION_ID_PATTERN.match(username):
+        return False
+
+    # Reject systemd unit-style names (e.g., "user-1000", "session-42")
+    if _SYSTEMD_UNIT_PATTERN.match(username):
+        return False
+
+    # Reject strings that look like numeric IDs with a letter prefix
+    # e.g., "c42", "s390", "v4" - but allow real names like "admin", "guest"
+    if len(username) <= 4 and username[0].isalpha() and username[1:].isdigit():
+        return False
+
+    # Reject strings ending with common suffixes that indicate non-usernames
+    # e.g., ".service", ".timer", ".socket", ".scope", ".slice"
+    non_user_suffixes = ('_t', '_d', 'pid', 'uid', 'gid', 'sid')
+    if lower.endswith(non_user_suffixes) and len(username) <= 6:
+        return False
+
+    # Reject strings that are ALL UPPERCASE (likely constants, not usernames)
+    # Real usernames are almost always lowercase or mixed case
+    if username.isupper() and len(username) > 3:
+        return False
+
     return True
 
 
