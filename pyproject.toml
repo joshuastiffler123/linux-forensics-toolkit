@@ -43,4 +43,8 @@ py-modules = [
     "linux_memory_analyzer",
     "linux_package_analyzer",
     "linux_network_analyzer",
+    "linux_filesystem_timeline",
+    "linux_ioc_scanner",
+    "linux_misc_artifacts",
+    "linux_string_analyzer",
 ]
