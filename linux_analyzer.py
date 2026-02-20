@@ -1752,17 +1752,17 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                             "output_files": [], "error": str(exc)})
 
     # Run IOC scanner if IOC file provided (runs last to also scan analysis output)
-    if ioc_file:
+    if ioc_path:
         if verbose:
             print(f"\n{Style.INFO}Running IOC Scanner...{Style.RESET}", file=sys.stderr)
-            print(f"  {Style.DIM}IOC File: {ioc_file}{Style.RESET}", file=sys.stderr)
+            print(f"  {Style.DIM}IOC File: {ioc_path}{Style.RESET}", file=sys.stderr)
 
         try:
             ioc_result = run_ioc_scanner(
                 source_path=source_path,
                 output_dir=output_dir,
                 hostname=hostname,
-                ioc_file=ioc_file
+                ioc_file=ioc_path
             )
             results.append(ioc_result)
 
@@ -2097,8 +2097,6 @@ Output:
             quick_memory=args.quick_memory,
             bodyfile_path=bodyfile_path,
             ioc_path=ioc_path,
-
-            ioc_file=ioc_file
         )
         
         # Exit with error code if any analyzer failed completely
