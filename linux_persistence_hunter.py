@@ -245,6 +245,7 @@ MITRE_MAPPINGS = {
     "makefile_backdoor": ("Supply Chain Compromise", "T1195"),
     "ip_connection": ("Network Service Discovery", "T1046"),
     "git_hook_active": ("Event Triggered Execution", "T1546"),
+    "cryptominer": ("Resource Hijacking", "T1496"),
 }
 
 
@@ -905,8 +906,9 @@ class PersistenceHunter:
             ("Makefile Backdoors", self._check_makefiles),
             ("IP Connection Patterns", self._check_ip_connections),
             ("Active Git Hooks", self._check_git_hooks_active),
+            ("Cryptominer Indicators", self._check_cryptominers),
         ]
-        
+
         for i, (name, check_func) in enumerate(checks, 1):
             if verbose:
                 print(f"\n{Style.INFO}[{i}/{len(checks)}] Checking {name}...{Style.RESET}", file=sys.stderr)
@@ -3894,6 +3896,169 @@ class PersistenceHunter:
         
         return "unknown"
     
+    def _check_cryptominers(self) -> int:
+        """
+        Detect cryptominer indicators across the filesystem.
+
+        Looks for:
+          - Known miner binary names in any executable path
+          - Mining pool stratum protocol strings in scripts/configs
+          - Wallet address patterns embedded in scripts
+          - Common miner process names in UAC process-list snapshots
+          - Miner configuration files (config.json with pool/wallet keys)
+
+        MITRE ATT&CK: T1496 – Resource Hijacking
+        """
+        count = 0
+
+        # ---- Known miner binary names ------------------------------------ #
+        _MINER_BINARIES = frozenset({
+            'xmrig', 'xmr-stak', 'xmr-stak-rx', 'cpuminer', 'cpuminer-multi',
+            'minerd', 'cgminer', 'bfgminer', 'ethminer', 'nsfminer',
+            'nbminer', 't-rex', 'teamredminer', 'claymore', 'nanominer',
+            'gminer', 'miniz', 'lolminer', 'wildrig-multi', 'srb-miner',
+            'srbminer', 'xmr-node-proxy', 'xmrig-proxy', 'monero-miner',
+            'crypto-miner', 'kryptex', 'phoenixminer', 'trex', 'excavator',
+        })
+
+        # Scan filesystem paths for known miner binary names
+        all_files = self.handler.find_files([
+            r'\.sh$', r'\.py$', r'\.pl$', r'\.conf$',
+            r'\.json$', r'\.yaml$', r'\.yml$', r'\.cfg$',
+            r'\.service$', r'\.timer$', r'crontab$',
+            r'rc\.local$', r'\.bashrc$', r'\.profile$',
+        ])
+
+        # Also try to get a process list from UAC live_response
+        process_files = self.handler.find_files([
+            r'ps\.txt$', r'ps_aux\.txt$', r'process_list\.txt$',
+            r'*live_response*ps*', r'*live_response*process*',
+        ])
+
+        # ---- Check for miner binary names in paths found in files -------- #
+        _RE_PATH_LIKE = re.compile(r'(?:^|[\s"\'])(/?(?:[\w./\-]+/)*)(\w+)\b')
+        _STRATUM_RE   = re.compile(
+            r'stratum\+(?:tcp|ssl)://', re.IGNORECASE)
+        _POOL_RE      = re.compile(
+            r'(?:pool|mining[_-]?pool|mine\.)[a-z0-9.-]+\.[a-z]{2,}',
+            re.IGNORECASE)
+        # Monero wallet: 95/96 character base58 string starting with 4
+        _XMR_WALLET_RE = re.compile(r'\b4[0-9A-Za-z]{94,95}\b')
+        # Generic crypto wallet patterns (ETH, BTC prefixes)
+        _ETH_WALLET_RE = re.compile(r'\b0x[0-9a-fA-F]{40}\b')
+        _BTC_WALLET_RE = re.compile(r'\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b')
+
+        _MINER_CONFIG_KEYS = re.compile(
+            r'"(?:pool|url|wallet|pass|coin|algo|worker)"'
+            r'\s*:', re.IGNORECASE)
+
+        checked_paths: set = set()
+
+        for filepath, member in all_files:
+            if filepath in checked_paths:
+                continue
+            checked_paths.add(filepath)
+
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+
+            # Check filename itself
+            fname_lower = os.path.basename(filepath).lower()
+            for miner in _MINER_BINARIES:
+                if miner in fname_lower:
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key='cryptominer',
+                        severity='CRITICAL',
+                        description=f"Known cryptominer binary name '{miner}' in path",
+                        indicator=filepath,
+                        raw_content=filepath[:200],
+                    )
+                    count += 1
+                    break
+
+            # Scan content line by line
+            for line_num, line in enumerate(content.splitlines(), 1):
+                line_lower = line.lower()
+                hit_desc = ''
+                hit_sev  = 'HIGH'
+                hit_ind  = line[:120].strip()
+
+                # Miner binary name referenced in script
+                for miner in _MINER_BINARIES:
+                    if miner in line_lower:
+                        hit_desc = f"Reference to known miner binary '{miner}'"
+                        hit_sev  = 'CRITICAL'
+                        break
+
+                if not hit_desc and _STRATUM_RE.search(line):
+                    hit_desc = "Mining pool stratum protocol URL"
+                    hit_sev  = 'CRITICAL'
+
+                if not hit_desc and _POOL_RE.search(line):
+                    hit_desc = "Mining pool domain reference"
+                    hit_sev  = 'HIGH'
+
+                if not hit_desc and _XMR_WALLET_RE.search(line):
+                    hit_desc = "Monero (XMR) wallet address"
+                    hit_sev  = 'HIGH'
+
+                if not hit_desc and _ETH_WALLET_RE.search(line):
+                    hit_desc = "Ethereum wallet address in script"
+                    hit_sev  = 'MEDIUM'
+
+                if not hit_desc and _MINER_CONFIG_KEYS.search(line):
+                    # Only high-signal if multiple miner config keys appear
+                    if content.count('"pool"') + content.count('"algo"') >= 2:
+                        hit_desc = "Cryptominer configuration key (pool/wallet/algo)"
+                        hit_sev  = 'HIGH'
+
+                if hit_desc:
+                    self._add_finding(
+                        filepath=filepath,
+                        technique_key='cryptominer',
+                        severity=hit_sev,
+                        description=hit_desc,
+                        indicator=hit_ind,
+                        line_number=line_num,
+                        raw_content=line[:200],
+                    )
+                    count += 1
+                    break  # one finding per file to avoid noise
+
+        # ---- Check process list for running miners ----------------------- #
+        for filepath, member in process_files:
+            data = self.handler.get_file(filepath)
+            if not data:
+                continue
+            try:
+                content = data.decode('utf-8', errors='replace')
+            except Exception:
+                continue
+            for line_num, line in enumerate(content.splitlines(), 1):
+                line_lower = line.lower()
+                for miner in _MINER_BINARIES:
+                    if miner in line_lower:
+                        self._add_finding(
+                            filepath=filepath,
+                            technique_key='cryptominer',
+                            severity='CRITICAL',
+                            description=f"Active miner process '{miner}' in process list",
+                            indicator=line[:120].strip(),
+                            line_number=line_num,
+                            raw_content=line[:200],
+                        )
+                        count += 1
+                        break
+
+        return count
+
+
     def _export_raw_scheduled_tasks(self, output_dir: str) -> int:
         """
         Export full raw contents of scheduled task files to a subdirectory.
@@ -3966,6 +4131,7 @@ class PersistenceHunter:
                     finding.exported_file = export_path
 
         return exported
+
 
     def export_csv(self, output_path: str) -> None:
         """Export findings to CSV and raw scheduled task files to subdirectory."""

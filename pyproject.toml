@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "linux-forensics-toolkit"
+version = "1.1.0"
+description = "Linux IR forensic triage toolkit for analyzing UAC collections"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+keywords = [
+    "forensics", "incident-response", "linux", "dfir",
+    "uac", "memory-forensics", "triage", "blue-team",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+    "Environment :: Console",
+]
+# Disk forensics: pure standard-library — no mandatory pip deps
+dependencies = []
+
+[project.optional-dependencies]
+# Memory forensics via Volatility 3
+memory = ["volatility3>=2.0.0"]
+
+[project.scripts]
+# After `pip install -e .`, the `lfa` command is available system-wide
+lfa = "linux_analyzer:main"
+
+[tool.setuptools]
+# Individual top-level modules (no package directory required)
+py-modules = [
+    "linux_analyzer",
+    "linux_login_timeline",
+    "linux_journal_analyzer",
+    "linux_persistence_hunter",
+    "linux_security_analyzer",
+    "linux_memory_analyzer",
+    "linux_package_analyzer",
+    "linux_network_analyzer",
+]
