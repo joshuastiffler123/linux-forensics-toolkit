@@ -79,6 +79,548 @@ class Style:
 
 
 # ============================================================================
+# Forensic Audit Logger
+# ============================================================================
+
+# Metadata for every analyzer: what it does, what it examines, what analysts
+# should look for.  Written to [hostname]_audit.log alongside the CSVs.
+
+ANALYZER_METADATA = {
+    "Login Timeline": {
+        "purpose": (
+            "Extract authentication and login events to build a user activity "
+            "timeline.  Essential for identifying unauthorized access, lateral "
+            "movement, and privilege escalation."
+        ),
+        "examines": [
+            "/var/log/auth.log*          — SSH logins, sudo, PAM events",
+            "/var/log/secure*            — RHEL/CentOS equivalent of auth.log",
+            "/var/log/wtmp               — Successful logins (binary utmp format)",
+            "/var/log/btmp               — Failed login attempts (binary)",
+            "/var/log/lastlog            — Last login timestamp per user",
+            "/var/log/audit/audit.log*   — Linux Audit Framework events",
+            "/var/log/syslog*            — General system log (Debian/Ubuntu)",
+            "/var/log/messages*          — General system log (RHEL/CentOS)",
+            "/home/*/.bash_history       — Per-user command history",
+            "/root/.bash_history         — Root command history",
+        ],
+        "searches_for": [
+            "SSH session open/close (sshd Accepted/Failed/Invalid user)",
+            "sudo/su privilege escalation attempts",
+            "Failed authentication patterns (brute force indicators)",
+            "User/group creation or modification (useradd, usermod, passwd)",
+            "Account lockouts and PAM failures",
+        ],
+        "analyst_guidance": [
+            "Look for logins outside normal business hours",
+            "SSH from unexpected source IPs or countries",
+            "Multiple failed attempts followed by a success (brute force)",
+            "sudo/su usage by non-administrative accounts",
+            "Commands run as root that don't match normal admin activity",
+            "Gaps in bash_history (may indicate history clearing)",
+        ],
+    },
+    "Journal Analyzer": {
+        "purpose": (
+            "Parse systemd journal binary logs for service events, kernel "
+            "messages, and security-relevant entries that may not appear in "
+            "traditional syslog files."
+        ),
+        "examines": [
+            "/var/log/journal/           — Systemd binary journal files",
+            "/run/log/journal/           — Volatile journal (lost on reboot)",
+            "Exported journalctl text/JSON output (if present in UAC)",
+        ],
+        "searches_for": [
+            "Service start/stop/crash events (systemctl)",
+            "Kernel messages (OOM killer, segfaults, module loads)",
+            "Security-relevant events (authentication, authorization)",
+            "Boot/shutdown sequences",
+            "Failed unit activations",
+        ],
+        "analyst_guidance": [
+            "Services started or stopped near incident time",
+            "Kernel module load events (potential rootkit)",
+            "OOM kills or segfaults in critical services",
+            "Entries at EMERG/ALERT/CRIT priority levels",
+            "Journal entries reference the security-filtered CSV for high-signal events",
+        ],
+    },
+    "Persistence Hunter": {
+        "purpose": (
+            "Detect attacker persistence mechanisms across 30+ techniques, "
+            "each mapped to MITRE ATT&CK.  This is often the highest-value "
+            "output for IR because persistence survives reboots."
+        ),
+        "examines": [
+            "/etc/cron.*  /var/spool/cron/   — Scheduled tasks (cron)",
+            "/var/spool/at/                  — At job queue",
+            "/etc/systemd/system/            — Systemd services and timers",
+            "/etc/init.d/  /etc/rc.local     — Init scripts",
+            "~/.ssh/authorized_keys          — SSH public keys",
+            "~/.bashrc ~/.profile ~/.zshrc   — Shell profile persistence",
+            "/etc/ld.so.preload              — LD_PRELOAD hijacking",
+            "/etc/pam.d/                     — PAM configuration (backdoors)",
+            "/etc/sudoers  /etc/sudoers.d/   — Sudo rule modifications",
+            "/etc/udev/rules.d/             — Udev rule persistence",
+            "~/.config/autostart/           — XDG autostart entries",
+            ".git/hooks/                    — Git hook persistence",
+            "/etc/update-motd.d/            — MOTD execution on login",
+            "/etc/polkit-1/                 — Polkit privilege rules",
+            "APT/DNF/YUM hooks              — Package manager hook persistence",
+            "/lib/modules/                  — Kernel module (LKM rootkit)",
+            "Web-accessible directories     — Webshell detection",
+            "Process list (UAC live_response) — Running cryptominers",
+        ],
+        "searches_for": [
+            "Known miner binaries (xmrig, cpuminer, ethminer, etc.)",
+            "Mining pool stratum:// URLs and pool domains",
+            "Cryptocurrency wallet addresses (XMR, ETH, BTC)",
+            "Reverse shell patterns (bash -i, /dev/tcp/, nc -e)",
+            "Curl/wget one-liners downloading to /tmp",
+            "SUID/SGID bits on unexpected binaries",
+            "UID=0 backdoor accounts",
+            "Authorized SSH keys not matching known users",
+            "LD_PRELOAD/LD_LIBRARY_PATH environment hijacking",
+            "Suspicious cron entries running scripts from /tmp or /dev/shm",
+        ],
+        "analyst_guidance": [
+            "CRITICAL severity findings need immediate investigation",
+            "Any unknown cron job or systemd service warrants review",
+            "SSH authorized_keys with unfamiliar key comments",
+            "Cryptominer hits indicate resource hijacking (T1496)",
+            "Check raw_scheduled_tasks/ subdirectory for full file contents",
+            "Cross-reference persistence timestamps with login timeline",
+        ],
+    },
+    "Security Analyzer": {
+        "purpose": (
+            "Scan for suspicious binaries, SUID files, rootkit indicators, "
+            "and environment anomalies.  Focuses on the filesystem state "
+            "rather than log history."
+        ),
+        "examines": [
+            "/tmp/ /var/tmp/ /dev/shm/      — World-writable temp directories",
+            "/usr/local/bin/ /usr/local/sbin/ — Non-packaged binaries",
+            "/etc/systemd/  /etc/init.d/     — Service configurations",
+            "/etc/cron.*  /var/spool/cron/   — Scheduled task files",
+            "/lib/modules/  /etc/modprobe.d/ — Kernel module configs",
+            "/etc/udev/rules.d/             — Udev rules",
+        ],
+        "searches_for": [
+            "SUID/SGID binaries outside standard locations",
+            "World-writable directories with executables",
+            "LD_PRELOAD hijacking (/etc/ld.so.preload)",
+            "Hidden files/directories in system paths",
+            "Binaries in /tmp or /dev/shm",
+            "Rootkit file/directory indicators",
+            "Suspicious file permissions (e.g. chmod 4755 in /tmp)",
+        ],
+        "analyst_guidance": [
+            "SUID files in /tmp or /home are almost always malicious",
+            "Any binary in /dev/shm is highly suspicious",
+            "LD_PRELOAD entries can hide processes and files (userland rootkit)",
+            "Cross-reference suspicious binaries with hash IOCs",
+        ],
+    },
+    "Package Analyzer": {
+        "purpose": (
+            "Parse package manager logs (dpkg, apt, yum, dnf, pacman) to "
+            "identify software installations, especially attacker tooling "
+            "installed post-compromise."
+        ),
+        "examines": [
+            "/var/log/dpkg.log*             — Debian/Ubuntu package operations",
+            "/var/log/apt/history.log*       — APT install/remove history",
+            "/var/log/apt/term.log*          — APT terminal output",
+            "/var/log/yum.log*               — CentOS/RHEL 6-7 packages",
+            "/var/log/dnf.log*               — CentOS/RHEL 8+, Fedora packages",
+            "/var/log/pacman.log*            — Arch Linux packages",
+            "/var/log/zypper.log*            — openSUSE packages",
+        ],
+        "searches_for": [
+            "Known attacker tools: nmap, masscan, nikto, gobuster, sqlmap",
+            "Post-exploitation kits: metasploit, linpeas, pspy",
+            "Tunneling tools: chisel, ligolo, ngrok, socat",
+            "Cryptominer packages: xmrig, cpuminer",
+            "Keyword fragments: rootkit, backdoor, exploit, keylogger",
+            "Package installs close to incident timestamp",
+        ],
+        "analyst_guidance": [
+            "Sort by timestamp — packages installed near incident time are key",
+            "Suspicious=Yes entries flag known attacker tooling",
+            "Package removals may indicate anti-forensic cleanup",
+            "Check 'Requested_By' column for which user installed what",
+        ],
+    },
+    "Network Analyzer": {
+        "purpose": (
+            "Audit network configuration files and parse web server access "
+            "logs for signs of compromise — DNS poisoning, firewall changes, "
+            "webshell access, and injection attempts."
+        ),
+        "examines": [
+            "/etc/hosts                     — Local DNS overrides",
+            "/etc/resolv.conf               — DNS resolver configuration",
+            "/etc/hosts.allow /etc/hosts.deny — TCP wrapper ACLs",
+            "/var/log/ufw.log*              — UFW firewall logs",
+            "/var/log/firewalld*            — Firewalld logs",
+            "UAC live_response: ARP cache, connections, routing table",
+            "/var/log/apache2/ /var/log/httpd/ — Apache access/error logs",
+            "/var/log/nginx/                — Nginx access/error logs",
+        ],
+        "searches_for": [
+            "Non-standard DNS resolvers (potential DNS hijacking)",
+            "Hosts file entries pointing domains to attacker IPs",
+            "Webshell filenames: c99.php, r57.php, shell.php, cmd.jsp",
+            "URI injection: directory traversal, SQLi, XSS, PHP eval",
+            "Suspicious user-agents: sqlmap, nmap, masscan, metasploit",
+            "POST requests to unusual paths with small responses (C2)",
+        ],
+        "analyst_guidance": [
+            "Non-RFC1918 entries in /etc/hosts are almost always malicious",
+            "Unknown DNS resolvers may indicate DNS hijacking or exfiltration",
+            "Web access log entries with high suspicion scores need review",
+            "POST to .php files in upload dirs may be webshell communication",
+        ],
+    },
+    "Filesystem Timeline": {
+        "purpose": (
+            "Build a full filesystem MAC (Modify/Access/Change/Birth) timeline "
+            "from a Sleuth Kit bodyfile or tarball metadata.  This is the "
+            "backbone of filesystem-level forensic analysis."
+        ),
+        "examines": [
+            "Bodyfile (bodyfile.txt, body, *.body) inside UAC collection",
+            "Tarball member metadata (mtime) when no bodyfile present",
+            "wtmp login records for timeline correlation",
+            "Audit logs for authentication events",
+        ],
+        "searches_for": [
+            "All file MAC timestamps (sorted chronologically)",
+            "File creation/modification in temp directories",
+            "Timestamp patterns indicating mass file modification (timestomping)",
+            "Deleted files (prefixed with * in bodyfile name field)",
+        ],
+        "analyst_guidance": [
+            "Focus on the time window around the suspected incident",
+            "Files modified in /tmp, /dev/shm, /var/tmp are high-priority",
+            "Clusters of file modifications in short time spans may indicate tooling",
+            "Deleted files (Is_Deleted=True) may be attacker cleanup",
+            "Cross-reference with login timeline to attribute file changes to users",
+        ],
+    },
+    "String Analyzer": {
+        "purpose": (
+            "Carve and extract structured log entries from text files, "
+            "including compressed logs.  Provides parsed versions of "
+            "audit, syslog, and web logs for easier analysis."
+        ),
+        "examines": [
+            "/var/log/audit/                — Linux Audit Framework logs",
+            "/var/log/messages /var/log/syslog — System logs",
+            "/var/log/auth.log /var/log/secure — Auth logs",
+            "/var/log/apache2/ /var/log/httpd/ /var/log/nginx/ — Web logs",
+            "Compressed variants (.gz, .bz2, .xz)",
+        ],
+        "searches_for": [
+            "Audit events: USER_AUTH, USER_END, EXECVE, SYSCALL",
+            "Syslog security processes: sshd, sudo, su, useradd, login",
+            "Security keywords: Accepted, Failed, Invalid user, COMMAND=",
+            "Apache/Nginx combined log format entries",
+        ],
+        "analyst_guidance": [
+            "Use the extracted CSVs for structured searching of raw logs",
+            "Audit logs contain system call data not found elsewhere",
+            "Web logs may reveal exploitation attempts pre-dating persistence",
+        ],
+    },
+    "Misc Artifacts": {
+        "purpose": (
+            "Detect archive files, hidden directories, and scheduled task "
+            "artifacts that may indicate data staging, exfiltration prep, "
+            "or attacker tool storage."
+        ),
+        "examines": [
+            "Full file tree for archive magic bytes (ZIP, GZIP, TAR, RAR, 7z)",
+            "Hidden directories (names starting with .) in all paths",
+            "/etc/cron.*, /var/spool/cron/, /var/spool/at/ — Task files",
+            "/etc/systemd/system/ — Systemd timer/service files",
+        ],
+        "searches_for": [
+            "Archive files in unexpected locations (data staging)",
+            "Hidden directories in /tmp, /var/tmp, /dev/shm",
+            "Scheduled task content with suspicious keywords",
+            "Magic byte detection: ZIP, GZIP, BZIP2, XZ, 7Z, RAR, TAR",
+        ],
+        "analyst_guidance": [
+            "Archives in /tmp or /dev/shm may be exfiltration staging",
+            "Hidden directories in world-writable paths are high-priority",
+            "Scheduled tasks with curl/wget/base64/python are suspicious",
+        ],
+    },
+    "IOC Scanner": {
+        "purpose": (
+            "Scan the entire UAC collection and all generated CSV output "
+            "for matches against a supplied list of known-bad indicators "
+            "(IPs, domains, hashes, file paths)."
+        ),
+        "examines": [
+            "All text files in the UAC collection (log, conf, sh, py, etc.)",
+            "All generated CSV output files from other analyzers",
+            "Max file size: 50 MB per file",
+        ],
+        "searches_for": [
+            "Exact string matches of each IOC against every line",
+            "IOC types: IPv4 addresses, domains, MD5/SHA256 hashes, file paths",
+        ],
+        "analyst_guidance": [
+            "Any IOC hit is high-priority — investigate the source file and context",
+            "Cross-reference IOC hits with the login and persistence timelines",
+            "Multiple hits for the same IOC across files confirms compromise scope",
+        ],
+    },
+    "IOC Matcher": {
+        "purpose": (
+            "Cross-reference supplied IOC indicators against all generated "
+            "CSV files using type-aware column matching (IP columns for IPs, "
+            "hash columns for hashes, etc.)."
+        ),
+        "examines": [
+            "All *_*.csv files in the output directory",
+        ],
+        "searches_for": [
+            "IP addresses in Source_IP, Dest_IP, Client_IP columns",
+            "Domains in hostname, domain, URL columns",
+            "MD5/SHA256 hashes in hash and checksum columns",
+            "File paths in filepath, filename, URI columns",
+        ],
+        "analyst_guidance": [
+            "Hits include the full CSV row for context — review surrounding events",
+            "IP hits in login timeline confirm attacker source addresses",
+            "Hash hits in persistence CSV confirm known-bad files deployed",
+        ],
+    },
+    "Log Gap Detection": {
+        "purpose": (
+            "Identify suspicious time gaps in the login/auth timeline where "
+            "no events were recorded.  Log gaps may indicate log tampering, "
+            "log rotation during an incident, or service disruption."
+        ),
+        "examines": [
+            "Login timeline CSV (timestamp column)",
+        ],
+        "searches_for": [
+            "Time periods >= 6 hours with zero recorded events",
+            "Gap severity: 6-24h = MEDIUM, 24-72h = HIGH, 72h+ = CRITICAL",
+        ],
+        "analyst_guidance": [
+            "CRITICAL gaps (72h+) strongly suggest log clearing",
+            "Compare gap windows with other log sources (journal, packages)",
+            "If logs exist in other sources during a gap, it confirms tampering",
+            "Check if the gap aligns with the suspected incident window",
+        ],
+    },
+    "Memory Analyzer": {
+        "purpose": (
+            "Analyze a memory dump using Volatility 3 to extract running "
+            "processes, network connections, and in-memory artifacts that "
+            "aren't visible on disk."
+        ),
+        "examines": [
+            "Memory dump file (.lime, .raw, .vmem, .dmp)",
+            "Kernel symbol tables (ISF/JSON format)",
+        ],
+        "searches_for": [
+            "Running processes (including hidden — pslist vs psscan)",
+            "Open network connections and listening sockets",
+            "Command line arguments of all processes",
+            "Loaded kernel modules (potential LKM rootkit)",
+            "In-memory bash history (survives history -c)",
+        ],
+        "analyst_guidance": [
+            "Processes in psscan but NOT pslist may be hidden (rootkit)",
+            "Network connections to C2 IPs visible only in memory",
+            "Bash history in memory may contain commands the attacker cleared",
+            "Loaded kernel modules not matching installed packages = LKM rootkit",
+        ],
+    },
+}
+
+
+class ForensicLogger:
+    """
+    Write a human-readable audit log documenting exactly what the toolkit
+    examined, what it searched for, what it found, and what analysts should
+    prioritise.  Written incrementally so partial logs survive interrupted runs.
+    """
+
+    SECTION_WIDTH = 78
+
+    def __init__(self, log_path: str):
+        self._path = log_path
+        self._fh = open(log_path, 'w', encoding='utf-8')
+        self._start = datetime.utcnow()
+
+    # -- internal helpers -------------------------------------------------- #
+
+    def _w(self, text: str = ''):
+        self._fh.write(text + '\n')
+        self._fh.flush()
+
+    def _header(self, title: str):
+        self._w()
+        self._w('=' * self.SECTION_WIDTH)
+        self._w(f'  {title}')
+        self._w('=' * self.SECTION_WIDTH)
+
+    def _subheader(self, title: str):
+        self._w()
+        self._w(f'--- {title} ' + '-' * max(0, self.SECTION_WIDTH - len(title) - 5))
+
+    # -- public API -------------------------------------------------------- #
+
+    def write_preamble(self, source: str, output_dir: str, hostname: str,
+                       bodyfile: Optional[str], ioc_path: Optional[str],
+                       memory_path: Optional[str], parallel: bool):
+        """Opening block with run metadata."""
+        self._w('=' * self.SECTION_WIDTH)
+        self._w('  LINUX FORENSICS TOOLKIT — ANALYSIS AUDIT LOG')
+        self._w('=' * self.SECTION_WIDTH)
+        self._w()
+        self._w('This log documents exactly what the toolkit examined, what')
+        self._w('patterns and indicators it searched for, what it found, and')
+        self._w('what you should focus on when reviewing the results.')
+        self._w()
+        self._w(f'  Tool Version   : {__version__}')
+        self._w(f'  Analysis Start : {self._start.strftime("%Y-%m-%d %H:%M:%S")} UTC')
+        self._w(f'  Hostname       : {hostname}')
+        self._w(f'  Source         : {source}')
+        self._w(f'  Output Dir     : {output_dir}')
+        self._w(f'  Execution      : {"Parallel" if parallel else "Sequential"}')
+        self._w(f'  Bodyfile       : {bodyfile or "(auto-detect / none)"}')
+        self._w(f'  IOC File       : {ioc_path or "(not provided)"}')
+        self._w(f'  Memory Dump    : {memory_path or "(not provided)"}')
+
+    def write_analyzer_start(self, name: str):
+        """Write the pre-analysis section explaining what the analyzer does."""
+        meta = ANALYZER_METADATA.get(name)
+        if not meta:
+            self._header(f'ANALYZER: {name}')
+            self._w('  (no metadata registered for this analyzer)')
+            return
+
+        self._header(f'ANALYZER: {name}')
+
+        self._subheader('Purpose')
+        self._w(f'  {meta["purpose"]}')
+
+        self._subheader('Files & Paths Examined')
+        for path in meta.get('examines', []):
+            self._w(f'  • {path}')
+
+        self._subheader('What It Searches For')
+        for pattern in meta.get('searches_for', []):
+            self._w(f'  • {pattern}')
+
+    def write_analyzer_result(self, name: str, result: Dict):
+        """Write the post-analysis section with findings and guidance."""
+        meta = ANALYZER_METADATA.get(name, {})
+
+        self._subheader('Results')
+        success = result.get('success', False)
+        error   = result.get('error')
+
+        if not success and error:
+            self._w(f'  Status  : FAILED — {error}')
+            return
+        if not success:
+            self._w(f'  Status  : SKIPPED')
+            return
+
+        # Count — different analyzers use different keys
+        count = (result.get('event_count') or result.get('finding_count')
+                 or result.get('findings_count') or 0)
+        self._w(f'  Status  : OK')
+        self._w(f'  Findings: {count:,}')
+
+        for f in result.get('output_files', []):
+            self._w(f'  Output  : {os.path.basename(f)}')
+
+        if meta.get('analyst_guidance'):
+            self._subheader('What To Look For In This Output')
+            for tip in meta['analyst_guidance']:
+                self._w(f'  >> {tip}')
+
+    def write_summary(self, results: List[Dict]):
+        """Final summary with prioritised review order."""
+        end = datetime.utcnow()
+        elapsed = (end - self._start).total_seconds()
+
+        self._header('ANALYSIS COMPLETE')
+        self._w()
+        self._w(f'  Finished : {end.strftime("%Y-%m-%d %H:%M:%S")} UTC')
+        self._w(f'  Duration : {elapsed:.1f} seconds')
+
+        # Tally
+        ok   = [r for r in results if r.get('success')]
+        fail = [r for r in results if not r.get('success') and r.get('error')]
+        skip = [r for r in results if not r.get('success') and not r.get('error')]
+
+        self._w(f'  Succeeded: {len(ok)}')
+        if fail:
+            self._w(f'  Failed   : {len(fail)}')
+            for r in fail:
+                self._w(f'             - {r["name"]}: {r.get("error", "unknown")}')
+        if skip:
+            self._w(f'  Skipped  : {len(skip)}')
+
+        # Prioritised review guidance
+        self._header('RECOMMENDED REVIEW ORDER')
+        self._w()
+        self._w('  1. Persistence Hunter CSV  — CRITICAL/HIGH findings first.')
+        self._w('     These survive reboots and are the clearest sign of compromise.')
+        self._w()
+        self._w('  2. IOC Hits CSV            — Any match = confirmed indicator.')
+        self._w('     Investigate every hit; cross-reference with login timeline.')
+        self._w()
+        self._w('  3. Login Timeline CSV      — Sort by timestamp around the')
+        self._w('     incident window.  Look for unusual IPs, brute force, sudo.')
+        self._w()
+        self._w('  4. Log Gaps CSV            — Gaps during the incident window')
+        self._w('     suggest log tampering.  Compare with journal entries.')
+        self._w()
+        self._w('  5. Package CSV             — Installs near incident time,')
+        self._w('     especially Suspicious=Yes entries (attacker tooling).')
+        self._w()
+        self._w('  6. Network CSV + Web Access — Webshell hits, DNS poisoning,')
+        self._w('     unusual firewall events, injection attempts in web logs.')
+        self._w()
+        self._w('  7. Security CSVs           — SUID files, rootkit traces,')
+        self._w('     binaries in /tmp or /dev/shm.')
+        self._w()
+        self._w('  8. Filesystem Timeline     — Narrow to the incident window.')
+        self._w('     Look for file creation in temp dirs and config changes.')
+        self._w()
+        self._w('  9. Journal CSV             — Service start/stop events,')
+        self._w('     kernel module loads, crash patterns.')
+        self._w()
+        self._w('  10. Memory Analysis        — Hidden processes, in-memory')
+        self._w('      connections, cleared bash history, LKM rootkits.')
+        self._w()
+        self._w('-' * self.SECTION_WIDTH)
+        self._w('  All timestamps in output CSVs are UTC.')
+        self._w('  This log file: intended for analyst reference and chain-of-custody.')
+        self._w('-' * self.SECTION_WIDTH)
+
+    def close(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
+# ============================================================================
 # Hostname Extraction
 # ============================================================================
 
@@ -1467,7 +2009,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             function will attempt to locate a bodyfile inside the UAC
             source automatically.
 
-        ioc_file: Optional path to IOC file for IOC scanning
+        ioc_path: Optional path to IOC file for scanning and CSV cross-reference
 
     Returns:
         Tuple of (output_directory, results_list)
@@ -1553,6 +2095,10 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     if verbose:
         print(f"{Style.INFO}Output Directory:{Style.RESET} {output_dir}", file=sys.stderr)
 
+    # ---- Forensic audit log ---------------------------------------------- #
+    audit_log_path = os.path.join(output_dir, f"{hostname}_audit.log")
+    audit = ForensicLogger(audit_log_path)
+
     # ---- Bodyfile resolution --------------------------------------------- #
     # Track whether we extracted the bodyfile to a temp path so we can clean
     # it up after analysis.
@@ -1583,6 +2129,13 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                     file=sys.stderr,
                 )
 
+    # Write audit log preamble (now that all options are resolved)
+    audit.write_preamble(
+        source=source_path, output_dir=output_dir, hostname=hostname,
+        bodyfile=bodyfile_path, ioc_path=ioc_path,
+        memory_path=memory_path, parallel=parallel,
+    )
+
     # Define analyzers to run
     analyzers = [
         ("Login Timeline",   run_login_timeline),
@@ -1591,8 +2144,6 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         ("Security Analyzer",  run_security_analyzer),
         ("Package Analyzer",   run_package_analyzer),
         ("Network Analyzer",   run_network_analyzer),
-
-        ("Security Analyzer", run_security_analyzer),
         ("Filesystem Timeline", run_filesystem_timeline),
         ("String Analyzer", run_string_analyzer),
         ("Misc Artifacts", run_misc_artifacts),
@@ -1609,22 +2160,27 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     
     results = []
     
+    # Log what each analyzer will examine (written before execution)
+    for name, _func in analyzers:
+        audit.write_analyzer_start(name)
+
     if parallel:
         if verbose:
             print(f"\n{Style.INFO}Running {len(analyzers)} analyzers in parallel...{Style.RESET}", file=sys.stderr)
-        
+
         with ThreadPoolExecutor(max_workers=len(analyzers)) as executor:
             futures = {}
             for name, func in analyzers:
                 future = executor.submit(func, source_path, output_dir, hostname)
                 futures[future] = name
-            
+
             for future in as_completed(futures):
                 name = futures[future]
                 try:
                     result = future.result()
                     results.append(result)
-                    
+                    audit.write_analyzer_result(name, result)
+
                     if verbose:
                         status = Style.SUCCESS + "✓" if result["success"] else Style.ERROR + "✗"
                         counts = []
@@ -1634,25 +2190,28 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                             counts.append(f"{result['finding_count']} findings")
                         count_str = f" ({', '.join(counts)})" if counts else ""
                         print(f"  {status} {name}{count_str}{Style.RESET}", file=sys.stderr)
-                        
+
                 except Exception as e:
-                    results.append({
+                    err_result = {
                         "name": name,
                         "success": False,
                         "output_files": [],
                         "error": str(e)
-                    })
+                    }
+                    results.append(err_result)
+                    audit.write_analyzer_result(name, err_result)
                     if verbose:
                         print(f"  {Style.ERROR}✗ {name}: {e}{Style.RESET}", file=sys.stderr)
     else:
         for name, func in analyzers:
             if verbose:
                 print(f"\n{Style.INFO}Running {name}...{Style.RESET}", file=sys.stderr)
-            
+
             try:
                 result = func(source_path, output_dir, hostname)
                 results.append(result)
-                
+                audit.write_analyzer_result(name, result)
+
                 if verbose and result["success"]:
                     counts = []
                     if result.get("event_count"):
@@ -1661,19 +2220,22 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                         counts.append(f"{result['finding_count']} findings")
                     count_str = f": {', '.join(counts)}" if counts else ""
                     print(f"  {Style.SUCCESS}✓ Complete{count_str}{Style.RESET}", file=sys.stderr)
-                    
+
             except Exception as e:
-                results.append({
+                err_result = {
                     "name": name,
                     "success": False,
                     "output_files": [],
                     "error": str(e)
-                })
+                }
+                results.append(err_result)
+                audit.write_analyzer_result(name, err_result)
                 if verbose:
                     print(f"  {Style.ERROR}✗ Error: {e}{Style.RESET}", file=sys.stderr)
     
     # Run memory analyzer if memory path provided
     if memory_path and os.path.exists(memory_path):
+        audit.write_analyzer_start("Memory Analyzer")
         if verbose:
             print(f"\n{Style.INFO}Running Memory Analyzer...{Style.RESET}", file=sys.stderr)
             print(f"  {Style.DIM}Image: {memory_path}{Style.RESET}", file=sys.stderr)
@@ -1689,6 +2251,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 quick=quick_memory
             )
             results.append(mem_result)
+            audit.write_analyzer_result("Memory Analyzer", mem_result)
             
             if verbose:
                 if mem_result["success"]:
@@ -1707,11 +2270,13 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {e}{Style.RESET}", file=sys.stderr)
     
     # ---- Post-processing: log gap detection --------------------------------- #
+    audit.write_analyzer_start("Log Gap Detection")
     if verbose:
         print(f"\n{Style.INFO}Running log gap detection...{Style.RESET}", file=sys.stderr)
     try:
         gap_result = run_log_gap_detection(output_dir, hostname)
         results.append(gap_result)
+        audit.write_analyzer_result("Log Gap Detection", gap_result)
         if verbose:
             if gap_result["finding_count"]:
                 print(
@@ -1728,6 +2293,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
 
     # ---- Post-processing: IOC matching -------------------------------------- #
     if ioc_path and os.path.isfile(ioc_path):
+        audit.write_analyzer_start("IOC Matcher")
         if verbose:
             print(f"\n{Style.INFO}Running IOC matching...{Style.RESET}",
                   file=sys.stderr)
@@ -1735,6 +2301,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         try:
             ioc_result = run_ioc_matcher(output_dir, hostname, ioc_path)
             results.append(ioc_result)
+            audit.write_analyzer_result("IOC Matcher", ioc_result)
             if verbose:
                 if ioc_result["finding_count"]:
                     print(
@@ -1753,6 +2320,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
 
     # Run IOC scanner if IOC file provided (runs last to also scan analysis output)
     if ioc_path:
+        audit.write_analyzer_start("IOC Scanner")
         if verbose:
             print(f"\n{Style.INFO}Running IOC Scanner...{Style.RESET}", file=sys.stderr)
             print(f"  {Style.DIM}IOC File: {ioc_path}{Style.RESET}", file=sys.stderr)
@@ -1765,6 +2333,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 ioc_file=ioc_path
             )
             results.append(ioc_result)
+            audit.write_analyzer_result("IOC Scanner", ioc_result)
 
             if verbose:
                 if ioc_result["success"]:
@@ -1773,14 +2342,20 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 else:
                     print(f"  {Style.ERROR}[FAILED] IOC Scanner: {ioc_result.get('error', 'Unknown error')}{Style.RESET}", file=sys.stderr)
         except Exception as e:
-            results.append({
+            err_result = {
                 "name": "IOC Scanner",
                 "success": False,
                 "output_files": [],
                 "error": str(e)
-            })
+            }
+            results.append(err_result)
+            audit.write_analyzer_result("IOC Scanner", err_result)
             if verbose:
                 print(f"  {Style.ERROR}[FAILED] IOC Scanner: {e}{Style.RESET}", file=sys.stderr)
+
+    # Write the final audit log summary and close the log file
+    audit.write_summary(results)
+    audit.close()
 
     end_time = datetime.now()
 
@@ -1981,9 +2556,15 @@ Output:
     
     # IOC scanning options
     parser.add_argument(
-        '-i', '--iocs',
+        '-i', '--ioc',
         default=None,
-        help='Path to IOC file (one string per line) for IOC scanning'
+        metavar='PATH',
+        help=(
+            'Path to an IOC file (one indicator per line: IPs, domains, '
+            'MD5/SHA256 hashes, file paths). Runs both string-match scanning '
+            'and CSV cross-reference after analysis. Lines starting with # '
+            'are comments.'
+        )
     )
 
     # Memory analysis options
@@ -2020,18 +2601,6 @@ Output:
     )
 
     parser.add_argument(
-        '--ioc',
-        default=None,
-        metavar='PATH',
-        help=(
-            'Path to an IOC file (one indicator per line: IPs, domains, '
-            'MD5/SHA256 hashes, file paths). Cross-referenced against all '
-            'generated CSVs after analysis completes. Lines starting with '
-            '# are treated as comments.'
-        )
-    )
-
-    parser.add_argument(
         '-v', '--version',
         action='version',
         version=f'%(prog)s {__version__}'
@@ -2047,12 +2616,6 @@ Output:
         print(f"{Style.ERROR}Error: Source not found: {source_path}{Style.RESET}", file=sys.stderr)
         sys.exit(1)
     
-    # Resolve IOC file path if provided
-    ioc_file = os.path.abspath(args.iocs) if args.iocs else None
-    if ioc_file and not os.path.isfile(ioc_file):
-        print(f"{Style.ERROR}Error: IOC file not found: {ioc_file}{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
-
     # Resolve memory path if provided
     memory_path = os.path.abspath(args.memory) if args.memory else None
     if memory_path and not os.path.exists(memory_path):
