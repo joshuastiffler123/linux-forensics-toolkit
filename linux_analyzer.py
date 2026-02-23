@@ -1393,6 +1393,9 @@ def run_log_gap_detection(output_dir: str, hostname: str,
     except Exception as exc:
         result["error"] = str(exc)
 
+    return result
+
+
 def run_string_analyzer(source_path: str, output_dir: str, hostname: str) -> Dict:
     """Run the string/log extraction analyzer."""
     result = {
@@ -1702,7 +1705,7 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
             except:
                 size_str = "unknown size"
             f.write(f"  {basename} ({size_str})\n")
-    
+
     return summary_path
 
 
@@ -2298,6 +2301,8 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                             counts.append(f"{result['finding_count']} findings")
                         count_str = f" ({', '.join(counts)})" if counts else ""
                         print(f"  {status} {name}{count_str}{Style.RESET}", file=sys.stderr)
+                        if not result["success"] and result.get("error"):
+                            print(f"       {Style.DIM}{result['error']}{Style.RESET}", file=sys.stderr)
 
                 except Exception as e:
                     err_result = {
@@ -2320,14 +2325,17 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 results.append(result)
                 audit.write_analyzer_result(name, result)
 
-                if verbose and result["success"]:
-                    counts = []
-                    if result.get("event_count"):
-                        counts.append(f"{result['event_count']} events")
-                    if result.get("finding_count"):
-                        counts.append(f"{result['finding_count']} findings")
-                    count_str = f": {', '.join(counts)}" if counts else ""
-                    print(f"  {Style.SUCCESS}✓ Complete{count_str}{Style.RESET}", file=sys.stderr)
+                if verbose:
+                    if result["success"]:
+                        counts = []
+                        if result.get("event_count"):
+                            counts.append(f"{result['event_count']} events")
+                        if result.get("finding_count"):
+                            counts.append(f"{result['finding_count']} findings")
+                        count_str = f": {', '.join(counts)}" if counts else ""
+                        print(f"  {Style.SUCCESS}✓ Complete{count_str}{Style.RESET}", file=sys.stderr)
+                    elif result.get("error"):
+                        print(f"  {Style.ERROR}✗ Failed: {result['error']}{Style.RESET}", file=sys.stderr)
 
             except Exception as e:
                 err_result = {
