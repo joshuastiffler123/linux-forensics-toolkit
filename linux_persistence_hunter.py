@@ -3021,8 +3021,8 @@ class PersistenceHunter:
                     try:
                         config = json.loads(content)
                         container_name = config.get('Name', '').lstrip('/')
-                        image = config.get('Config', {}).get('Image', 'unknown')
-                        state = config.get('State', {})
+                        image = (config.get('Config') or {}).get('Image', 'unknown')
+                        state = config.get('State') or {}
                         running = state.get('Running', False)
                         
                         status = "RUNNING" if running else "STOPPED"
@@ -3038,7 +3038,7 @@ class PersistenceHunter:
                         count += 1
                         
                         # Check for privileged mode
-                        host_config = config.get('HostConfig', {})
+                        host_config = config.get('HostConfig') or {}
                         if host_config.get('Privileged', False):
                             self._add_finding(
                                 filepath=config_path,

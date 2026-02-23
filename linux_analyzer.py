@@ -1581,11 +1581,119 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
                 sev = "HIGH" if hours >= 48 else ("MEDIUM" if hours >= 12 else "LOW")
                 f.write(f"  [{sev:6}] {start_s} → {end_s}  ({hours:.1f} h)\n")
         f.write("\n")
-        
+
+        # ── Artifact Summary ─────────────────────────────────────────────────
+        f.write("-" * 70 + "\n")
+        f.write("  Artifact Summary\n")
+        f.write("-" * 70 + "\n\n")
+
+        _SKIP_VALS = frozenset({'', '0.0.0.0', '::', '::1', 'n/a', '-', 'unknown', 'none'})
+
+        def _skip_ip(ip: str) -> bool:
+            v = ip.lower()
+            return v in _SKIP_VALS or v.startswith('127.') or v == '::1'
+
+        unique_users: set = set()
+        unique_ips: set = set()
+
+        # Login timeline – users and source IPs
+        login_csv = os.path.join(output_dir, f"{hostname}_login_timeline.csv")
+        if os.path.isfile(login_csv):
+            try:
+                with open(login_csv, newline='', encoding='utf-8', errors='replace') as _fh:
+                    for _row in csv.DictReader(_fh):
+                        u = (_row.get('username') or '').strip()
+                        if u and u.lower() not in _SKIP_VALS:
+                            unique_users.add(u)
+                        ip = (_row.get('source_ip') or '').strip()
+                        if ip and not _skip_ip(ip):
+                            unique_ips.add(ip)
+            except Exception:
+                pass
+
+        # Network findings – source and dest IPs
+        net_csv = os.path.join(output_dir, f"{hostname}_network.csv")
+        if os.path.isfile(net_csv):
+            try:
+                with open(net_csv, newline='', encoding='utf-8', errors='replace') as _fh:
+                    for _row in csv.DictReader(_fh):
+                        for _col in ('Source_IP', 'Dest_IP'):
+                            ip = (_row.get(_col) or '').strip()
+                            if ip and not _skip_ip(ip):
+                                unique_ips.add(ip)
+            except Exception:
+                pass
+
+        # Web access – client IPs
+        web_csv = os.path.join(output_dir, f"{hostname}_web_access.csv")
+        if os.path.isfile(web_csv):
+            try:
+                with open(web_csv, newline='', encoding='utf-8', errors='replace') as _fh:
+                    for _row in csv.DictReader(_fh):
+                        ip = (_row.get('Client_IP') or '').strip()
+                        if ip and not _skip_ip(ip):
+                            unique_ips.add(ip)
+            except Exception:
+                pass
+
+        def _ip_sort_key(ip: str):
+            parts = ip.split('.')
+            if len(parts) == 4:
+                try:
+                    return (0, tuple(int(p) for p in parts))
+                except ValueError:
+                    pass
+            return (1, (ip,))
+
+        if unique_users:
+            f.write(f"  Unique Users ({len(unique_users)}):\n")
+            for _u in sorted(unique_users):
+                f.write(f"    {_u}\n")
+            f.write("\n")
+
+        if unique_ips:
+            f.write(f"  Unique IP Addresses ({len(unique_ips)}):\n")
+            for _ip in sorted(unique_ips, key=_ip_sort_key):
+                f.write(f"    {_ip}\n")
+            f.write("\n")
+
+        # Top persistence findings (CRITICAL / HIGH)
+        persist_csv = os.path.join(output_dir, f"{hostname}_persistence.csv")
+        top_findings: List[Tuple] = []
+        if os.path.isfile(persist_csv):
+            try:
+                with open(persist_csv, newline='', encoding='utf-8', errors='replace') as _fh:
+                    for _row in csv.DictReader(_fh):
+                        sev = (_row.get('Severity') or '').upper()
+                        if sev in ('CRITICAL', 'HIGH'):
+                            top_findings.append((
+                                sev,
+                                _row.get('Technique', ''),
+                                _row.get('Description', ''),
+                                _row.get('Filepath', ''),
+                            ))
+            except Exception:
+                pass
+
+        if top_findings:
+            _sev_order = {'CRITICAL': 0, 'HIGH': 1}
+            top_findings.sort(key=lambda x: _sev_order.get(x[0], 9))
+            f.write(f"  Critical/High Persistence Findings ({len(top_findings)}):\n")
+            for _sev, _tech, _desc, _fp in top_findings[:20]:
+                f.write(f"    [{_sev}] {_tech}: {_desc}\n")
+                if _fp:
+                    f.write(f"           {_fp}\n")
+            if len(top_findings) > 20:
+                f.write(f"    ... and {len(top_findings) - 20} more (see persistence CSV)\n")
+            f.write("\n")
+
+        if not unique_users and not unique_ips and not top_findings:
+            f.write("  No artifact data collected.\n\n")
+
         f.write("-" * 70 + "\n")
         f.write("  Output Files\n")
         f.write("-" * 70 + "\n\n")
-        
+
         for filepath in sorted(all_files):
             basename = os.path.basename(filepath)
             try:
