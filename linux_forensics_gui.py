@@ -1205,6 +1205,7 @@ class AnalysisWorker(QThread):
         try:
             proc = subprocess.Popen(
                 cmd,
+                shell=False,          # explicit: cmd is a list, no shell interpretation
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=str(self._toolkit_dir),
