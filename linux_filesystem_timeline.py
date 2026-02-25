@@ -265,7 +265,7 @@ def bodyfile_to_timeline(entries: List[BodyfileEntry],
                ('b' if 'b' in flags else '.')
         try:
             ts = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%SZ")
+                "%Y-%m-%d %H:%M:%S")
         except (OSError, ValueError, OverflowError):
             continue
         timeline.append(TimelineEntry(

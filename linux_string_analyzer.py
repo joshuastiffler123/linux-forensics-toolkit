@@ -338,7 +338,7 @@ class StringAnalyzer:
                         epoch = float(epoch_str)
                         ts = datetime.fromtimestamp(
                             epoch, tz=timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                            "%Y-%m-%d %H:%M:%S")
                     except (ValueError, OSError, OverflowError):
                         ts = epoch_str
 
@@ -412,7 +412,7 @@ class StringAnalyzer:
                             ts_clean = base + tz_part
                         dt = datetime.fromisoformat(ts_clean)
                         ts_norm = dt.astimezone(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                            "%Y-%m-%d %H:%M:%S")
                     except (ValueError, OSError):
                         ts_norm = ts
 
@@ -538,7 +538,7 @@ class StringAnalyzer:
                         dt = datetime.strptime(
                             ts, "%d/%b/%Y:%H:%M:%S %z")
                         ts_norm = dt.astimezone(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                            "%Y-%m-%d %H:%M:%S")
                     except (ValueError, OSError):
                         ts_norm = ts
 
@@ -620,7 +620,7 @@ class StringAnalyzer:
                             ts_clean = base + tz_part
                         dt = datetime.fromisoformat(ts_clean)
                         ts_norm = dt.astimezone(timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                            "%Y-%m-%d %H:%M:%S")
                     except (ValueError, OSError):
                         ts_norm = ts
 
