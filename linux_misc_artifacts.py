@@ -288,7 +288,7 @@ class MiscArtifactsCollector:
                         'type': archive_type,
                         'mtime': datetime.fromtimestamp(
                             member.mtime, tz=timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ") if member.mtime else ""
+                            "%Y-%m-%d %H:%M:%S") if member.mtime else ""
                     })
                     count += 1
         else:
@@ -322,7 +322,7 @@ class MiscArtifactsCollector:
                             size = st.st_size
                             mtime = datetime.fromtimestamp(
                                 st.st_mtime, tz=timezone.utc).strftime(
-                                "%Y-%m-%dT%H:%M:%SZ")
+                                "%Y-%m-%d %H:%M:%S")
                         except (OSError, PermissionError):
                             size = 0
                             mtime = ""
@@ -413,7 +413,7 @@ class MiscArtifactsCollector:
                     'content': content,  # Store full content for raw export
                     'mtime': datetime.fromtimestamp(
                         member.mtime, tz=timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%SZ") if member.mtime else "",
+                        "%Y-%m-%d %H:%M:%S") if member.mtime else "",
                     'exported_file': ""
                 })
                 count += 1
@@ -442,7 +442,7 @@ class MiscArtifactsCollector:
                         size = st.st_size
                         mtime = datetime.fromtimestamp(
                             st.st_mtime, tz=timezone.utc).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ")
+                            "%Y-%m-%d %H:%M:%S")
                     except (OSError, PermissionError):
                         size = 0
                         mtime = ""
