@@ -2,10 +2,6 @@
 #
 # Disk forensics: Python standard library only — nothing to install.
 #
-# GUI frontend (linux_forensics_gui.py):
-#   pip install PyQt6
-PyQt6>=6.4.0
-#
 # Optional — memory forensics (Volatility 3).
 # Uncomment or install separately:
 #   pip install volatility3

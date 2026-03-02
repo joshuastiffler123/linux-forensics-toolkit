@@ -911,16 +911,24 @@ class FilesystemTimelineGenerator:
         if not self.login_entries:
             return
 
-        timeline = bodyfile_to_timeline(self.login_entries, "2001-01-01")
+        min_epoch = 978307200  # 2001-01-01 UTC
+        rows: List[Tuple[int, str]] = []
+        for entry in self.login_entries:
+            epoch = entry.mtime or entry.atime or entry.ctime or entry.crtime
+            if epoch and epoch > min_epoch:
+                rows.append((epoch, entry.name))
+        rows.sort(key=lambda r: r[0])
 
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(['Date', 'Size', 'Type', 'Mode', 'UID', 'GID',
-                             'Meta', 'File Name'])
-            for entry in timeline:
-                writer.writerow([entry.timestamp, entry.size, entry.macb,
-                                 entry.mode, entry.uid, entry.gid,
-                                 entry.inode, entry.name])
+            writer.writerow(['Timestamp', 'Event'])
+            for epoch, name in rows:
+                try:
+                    ts = datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ")
+                except (OSError, ValueError, OverflowError):
+                    continue
+                writer.writerow([ts, name])
 
 
 # ============================================================================

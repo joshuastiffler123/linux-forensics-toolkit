@@ -25,18 +25,12 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Desktop GUI (linux_forensics_gui.py)
-gui    = ["PyQt6>=6.4.0"]
 # Memory forensics via Volatility 3
 memory = ["volatility3>=2.0.0"]
-# Everything at once:  pip install -e ".[all]"
-all    = ["PyQt6>=6.4.0", "volatility3>=2.0.0"]
 
 [project.scripts]
-# CLI triage tool  →  lfa -s hostname.tar.gz
+# After `pip install -e .`, the `lfa` command is available system-wide
 lfa = "linux_analyzer:main"
-# Desktop GUI      →  lfg
-lfg = "linux_forensics_gui:main"
 
 [tool.setuptools]
 # Individual top-level modules (no package directory required)
@@ -53,5 +47,4 @@ py-modules = [
     "linux_ioc_scanner",
     "linux_misc_artifacts",
     "linux_string_analyzer",
-    "linux_forensics_gui",
 ]

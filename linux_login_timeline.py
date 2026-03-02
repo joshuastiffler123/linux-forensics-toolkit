@@ -1042,11 +1042,14 @@ def parse_utmp_record(data: bytes) -> Optional[Dict]:
         ut_tv_usec = unpacked[11]
         ut_addr_v6 = unpacked[12:16]
         
-        # Get IP address
+        # Get IP address - ut_host only holds a remote host for USER_PROCESS records;
+        # BOOT_TIME records store the kernel version string there (e.g. 5.14.0-503.14.1.el9_5.x86_64).
         if ut_addr_v6[0] != 0:
             source_ip = ip_from_int(ut_addr_v6[0])
+        elif ut_type == 7 and ut_host and not ut_host.startswith(":"):  # USER_PROCESS only
+            source_ip = ut_host
         else:
-            source_ip = ut_host if ut_host and not ut_host.startswith(":") else ""
+            source_ip = ""
         
         # Convert timestamp to UTC (ensure offset-naive for comparability)
         # Use utcfromtimestamp to avoid local timezone conversion
