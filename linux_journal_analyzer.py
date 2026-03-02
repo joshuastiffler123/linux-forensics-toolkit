@@ -37,7 +37,7 @@ import sys
 import tarfile
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Any
 
