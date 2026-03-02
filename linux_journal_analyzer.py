@@ -795,7 +795,7 @@ class JournalParser:
         self.stats = defaultdict(int)
         # Reference date for year inference on syslog-style timestamps (no year)
         # For forensic analysis, this should be set based on file mtimes or other context,
-        # not datetime.now() which would be incorrect for historical evidence.
+        # not datetime.now(tz=timezone.utc).replace(tzinfo=None) which would be incorrect for historical evidence.
         self.reference_date = reference_date
     
     def parse_all(self) -> List[JournalEntry]:
@@ -935,13 +935,13 @@ class JournalParser:
             # Microseconds since epoch - use UTC for forensic consistency
             try:
                 ts_us = int(obj['__REALTIME_TIMESTAMP'])
-                timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc)
+                timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
             except:
                 pass
         elif '_SOURCE_REALTIME_TIMESTAMP' in obj:
             try:
                 ts_us = int(obj['_SOURCE_REALTIME_TIMESTAMP'])
-                timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc)
+                timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
             except:
                 pass
         
@@ -1117,7 +1117,7 @@ class JournalParser:
             if realtime_us == 0 or realtime_us > 2000000000000000:  # Sanity check
                 return None
             
-            timestamp = datetime.fromtimestamp(realtime_us / 1000000, tz=timezone.utc)  # UTC for consistency
+            timestamp = datetime.fromtimestamp(realtime_us / 1000000, tz=timezone.utc).replace(tzinfo=None)  # UTC for consistency
             boot_id = boot_id_bytes.hex()
             
             # Parse entry items to get field data
@@ -1363,7 +1363,7 @@ class JournalParser:
                                 ts_str = context[ts_start:ts_end].decode('utf-8', errors='replace')
                                 ts_us = int(ts_str)
                                 if 1000000000000 < ts_us < 2000000000000000:
-                                    timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc)
+                                    timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
                             except:
                                 pass
                     
@@ -1379,7 +1379,7 @@ class JournalParser:
                                     # Microseconds since epoch, should be between ~2010 and ~2030
                                     # 2010: 1262304000000000, 2030: 1893456000000000
                                     if 1262304000000000 < potential_ts < 1900000000000000:
-                                        timestamp = datetime.fromtimestamp(potential_ts / 1000000, tz=timezone.utc)
+                                        timestamp = datetime.fromtimestamp(potential_ts / 1000000, tz=timezone.utc).replace(tzinfo=None)
                                         break
                                 except:
                                     pass
@@ -1400,7 +1400,7 @@ class JournalParser:
                                     epoch_sec = int(match.group(1))
                                     # Sanity check: between 2010 and 2030
                                     if 1262304000 < epoch_sec < 1900000000:
-                                        timestamp = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+                                        timestamp = datetime.fromtimestamp(epoch_sec, tz=timezone.utc).replace(tzinfo=None)
                                         break
                                 except:
                                     pass
@@ -1464,7 +1464,7 @@ class JournalParser:
         Args:
             ts_str: Timestamp string to parse
             reference_date: Reference date for year inference. If None, uses self.reference_date
-                           or falls back to datetime.now() (not recommended for forensics).
+                           or falls back to datetime.now(tz=timezone.utc).replace(tzinfo=None) (not recommended for forensics).
         
         Returns:
             datetime object or None
@@ -1488,7 +1488,7 @@ class JournalParser:
             
             # Determine reference date for year inference (use UTC)
             if reference_date is None:
-                reference_date = self.reference_date if self.reference_date else datetime.now(tz=timezone.utc)
+                reference_date = self.reference_date if self.reference_date else datetime.now(tz=timezone.utc).replace(tzinfo=None)
             
             reference_year = reference_date.year
             
@@ -1814,12 +1814,12 @@ Supported Formats:
             print(f"\n{Style.INFO}Parsing journal entries...{Style.RESET}", file=sys.stderr)
         
         # Determine reference date for year inference on syslog-style timestamps
-        # For forensic analysis, use file mtime rather than datetime.now()
+        # For forensic analysis, use file mtime rather than datetime.now(tz=timezone.utc).replace(tzinfo=None)
         reference_date = None
         if os.path.isfile(args.source):
             try:
                 mtime = os.path.getmtime(args.source)
-                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                 if verbose:
                     print(f"{Style.INFO}Reference date (from file mtime, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
             except (OSError, ValueError):
@@ -1834,7 +1834,7 @@ Supported Formats:
                     log_path = os.path.join(args.source, log_pattern)
                     if os.path.exists(log_path):
                         mtime = os.path.getmtime(log_path)
-                        reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                        reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                         if verbose:
                             print(f"{Style.INFO}Reference date (from {log_pattern}, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
                         break
@@ -1851,7 +1851,7 @@ Supported Formats:
                                     log_path = os.path.join(var_log, log_name)
                                     if os.path.exists(log_path):
                                         mtime = os.path.getmtime(log_path)
-                                        reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                                        reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                                         rel_path = os.path.relpath(log_path, args.source)
                                         if verbose:
                                             print(f"{Style.INFO}Reference date (from {rel_path}):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
@@ -1864,7 +1864,7 @@ Supported Formats:
                 pass
         
         if reference_date is None:
-            reference_date = datetime.now(tz=timezone.utc)
+            reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
             if verbose:
                 print(f"{Style.WARNING}Reference date (using current UTC - may be inaccurate):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
         

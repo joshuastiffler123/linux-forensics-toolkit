@@ -1053,7 +1053,7 @@ def parse_utmp_record(data: bytes) -> Optional[Dict]:
         
         # Convert timestamp to UTC
         try:
-            timestamp = datetime.fromtimestamp(ut_tv_sec, tz=timezone.utc) if ut_tv_sec > 0 else None
+            timestamp = datetime.fromtimestamp(ut_tv_sec, tz=timezone.utc).replace(tzinfo=None) if ut_tv_sec > 0 else None
         except (OSError, ValueError, OverflowError):
             timestamp = None
         
@@ -1200,7 +1200,7 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                     
                     if ll_time > 0:
                         try:
-                            timestamp = datetime.fromtimestamp(ll_time, tz=timezone.utc)  # UTC for consistency
+                            timestamp = datetime.fromtimestamp(ll_time, tz=timezone.utc).replace(tzinfo=None)  # UTC for consistency
                         except (OSError, ValueError, OverflowError):
                             timestamp = None
                             
@@ -1610,18 +1610,18 @@ def parse_syslog_timestamp(timestamp_str: str, reference_date: datetime = None) 
     Syslog timestamps don't include a year, so we must infer it from context.
     For forensic analysis, we use a reference date (typically from the file's
     modification time or from binary logs that include full timestamps) rather
-    than datetime.now(), since the evidence may be historical.
+    than datetime.now(tz=timezone.utc).replace(tzinfo=None), since the evidence may be historical.
     
     Args:
         timestamp_str: Timestamp string (e.g., "Dec 17 10:30:45")
         reference_date: Reference datetime for year inference. If None, uses
-                       datetime.now() as fallback (not recommended for forensics).
+                       datetime.now(tz=timezone.utc).replace(tzinfo=None) as fallback (not recommended for forensics).
         
     Returns:
         datetime object or None (always offset-naive)
     """
     if reference_date is None:
-        reference_date = datetime.now(tz=timezone.utc)
+        reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     reference_year = reference_date.year
     
@@ -1697,7 +1697,7 @@ def parse_audit_timestamp(line: str) -> Optional[datetime]:
     if match:
         try:
             epoch = int(match.group(1))
-            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)  # UTC for forensic consistency
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)  # UTC for forensic consistency
             return dt
         except (OSError, ValueError, OverflowError):
             pass
@@ -1712,7 +1712,7 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
         filepath: Path to log file
         data: Optional raw data (if reading from tarball)
         reference_date: Reference datetime for year inference on syslog timestamps.
-                       If None, attempts to use file mtime, then falls back to datetime.now().
+                       If None, attempts to use file mtime, then falls back to datetime.now(tz=timezone.utc).replace(tzinfo=None).
         
     Returns:
         List of TimelineEvent objects
@@ -1725,13 +1725,13 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
             except (OSError, ValueError):
-                reference_date = datetime.now(tz=timezone.utc)
+                reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         else:
-            # Data was provided (from tarball), use datetime.now(tz=timezone.utc) as fallback
+            # Data was provided (from tarball), use datetime.now(tz=timezone.utc).replace(tzinfo=None) as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.now(tz=timezone.utc)
+            reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     # Helper to safely get group or empty string
     def safe_group(groups, idx, default=""):
@@ -2340,7 +2340,7 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
         filepath: Path to syslog or messages file
         data: Optional raw data (if reading from tarball)
         reference_date: Reference datetime for year inference on syslog timestamps.
-                       If None, attempts to use file mtime, then falls back to datetime.now().
+                       If None, attempts to use file mtime, then falls back to datetime.now(tz=timezone.utc).replace(tzinfo=None).
         
     Returns:
         List of TimelineEvent objects
@@ -2353,13 +2353,13 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
             except (OSError, ValueError):
-                reference_date = datetime.now(tz=timezone.utc)
+                reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         else:
-            # Data was provided (from tarball), use datetime.now(tz=timezone.utc) as fallback
+            # Data was provided (from tarball), use datetime.now(tz=timezone.utc).replace(tzinfo=None) as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.now(tz=timezone.utc)
+            reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     # Keywords that indicate login/user activity
     LOGIN_KEYWORDS = [
@@ -2600,7 +2600,7 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
     
     # If no mtime provided, use current time as fallback
     if file_mtime is None:
-        file_mtime = datetime.now()
+        file_mtime = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     try:
         with open_file(filepath, binary=False, data=data) as f:
@@ -2621,7 +2621,7 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
                     epoch = int(line[1:])
                     # Validate epoch is reasonable (after 2000, before 2100)
                     if 946684800 < epoch < 4102444800:
-                        current_timestamp = datetime.fromtimestamp(epoch, tz=timezone.utc)  # UTC for consistency
+                        current_timestamp = datetime.fromtimestamp(epoch, tz=timezone.utc).replace(tzinfo=None)  # UTC for consistency
                 except (ValueError, OSError, OverflowError):
                     # Not a valid timestamp, might be a comment
                     pass
@@ -2734,7 +2734,7 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
             
             # Get file modification time in UTC
             try:
-                mtime = datetime.fromtimestamp(member.mtime, tz=timezone.utc)
+                mtime = datetime.fromtimestamp(member.mtime, tz=timezone.utc).replace(tzinfo=None)
             except (OSError, ValueError, OverflowError):
                 mtime = None
             
@@ -2787,7 +2787,7 @@ def find_history_files_in_directory(base_path: str) -> List[Tuple[str, str, Opti
                     if os.path.isfile(filepath):
                         # Get file modification time in UTC
                         try:
-                            mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=timezone.utc)
+                            mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=timezone.utc).replace(tzinfo=None)
                         except (OSError, ValueError, OverflowError):
                             mtime = None
                         

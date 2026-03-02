@@ -460,7 +460,7 @@ class ForensicLogger:
     def __init__(self, log_path: str):
         self._path = log_path
         self._fh = open(log_path, 'w', encoding='utf-8')
-        self._start = datetime.now(tz=timezone.utc)
+        self._start = datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     # -- internal helpers -------------------------------------------------- #
 
@@ -554,7 +554,7 @@ class ForensicLogger:
 
     def write_summary(self, results: List[Dict]):
         """Final summary with prioritised review order."""
-        end = datetime.now(tz=timezone.utc)
+        end = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         elapsed = (end - self._start).total_seconds()
 
         self._header('ANALYSIS COMPLETE')
@@ -811,12 +811,12 @@ def run_journal_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         if os.path.isfile(source_path):
             try:
                 mtime = os.path.getmtime(source_path)
-                reference_date = datetime.fromtimestamp(mtime)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
             except (OSError, ValueError):
                 pass
         
         if reference_date is None:
-            reference_date = datetime.now()
+            reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
         
         parser = lja.JournalParser(handler, reference_date=reference_date)
         entries = parser.parse_all()
@@ -2033,7 +2033,7 @@ def run_bodyfile_analysis(bodyfile_path: str, output_dir: str, hostname: str) ->
                     if ts <= 0 or ts > _MAX_EPOCH:
                         continue
                     try:
-                        dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
+                        dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
                     except (OSError, OverflowError, ValueError):
                         continue
 
@@ -2126,7 +2126,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         Tuple of (output_directory, results_list)
     """
     Style.enable_windows_ansi()
-    start_time = datetime.now()
+    start_time = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     # Resolve source path
     source_path = os.path.abspath(source_path)
@@ -2473,7 +2473,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     audit.write_summary(results)
     audit.close()
 
-    end_time = datetime.now()
+    end_time = datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     # Create summary report
     if verbose:
