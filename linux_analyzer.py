@@ -2033,7 +2033,7 @@ def run_bodyfile_analysis(bodyfile_path: str, output_dir: str, hostname: str) ->
                     if ts <= 0 or ts > _MAX_EPOCH:
                         continue
                     try:
-                        dt_utc = datetime.utcfromtimestamp(ts)
+                        dt_utc = datetime.fromtimestamp(ts, tz=timezone.utc)
                     except (OSError, OverflowError, ValueError):
                         continue
 

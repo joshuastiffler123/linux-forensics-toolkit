@@ -1051,10 +1051,9 @@ def parse_utmp_record(data: bytes) -> Optional[Dict]:
         else:
             source_ip = ""
         
-        # Convert timestamp to UTC (ensure offset-naive for comparability)
-        # Use utcfromtimestamp to avoid local timezone conversion
+        # Convert timestamp to UTC
         try:
-            timestamp = datetime.utcfromtimestamp(ut_tv_sec) if ut_tv_sec > 0 else None
+            timestamp = datetime.fromtimestamp(ut_tv_sec, tz=timezone.utc) if ut_tv_sec > 0 else None
         except (OSError, ValueError, OverflowError):
             timestamp = None
         
@@ -1201,7 +1200,7 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                     
                     if ll_time > 0:
                         try:
-                            timestamp = datetime.utcfromtimestamp(ll_time)  # UTC for consistency
+                            timestamp = datetime.fromtimestamp(ll_time, tz=timezone.utc)  # UTC for consistency
                         except (OSError, ValueError, OverflowError):
                             timestamp = None
                             
@@ -1698,7 +1697,7 @@ def parse_audit_timestamp(line: str) -> Optional[datetime]:
     if match:
         try:
             epoch = int(match.group(1))
-            dt = datetime.utcfromtimestamp(epoch)  # UTC for forensic consistency
+            dt = datetime.fromtimestamp(epoch, tz=timezone.utc)  # UTC for forensic consistency
             return dt
         except (OSError, ValueError, OverflowError):
             pass
@@ -1726,7 +1725,7 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.utcfromtimestamp(mtime)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
             except (OSError, ValueError):
                 reference_date = datetime.utcnow()
         else:
@@ -2354,7 +2353,7 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
         if data is None and os.path.exists(filepath):
             try:
                 mtime = os.path.getmtime(filepath)
-                reference_date = datetime.utcfromtimestamp(mtime)
+                reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
             except (OSError, ValueError):
                 reference_date = datetime.utcnow()
         else:
@@ -2622,7 +2621,7 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
                     epoch = int(line[1:])
                     # Validate epoch is reasonable (after 2000, before 2100)
                     if 946684800 < epoch < 4102444800:
-                        current_timestamp = datetime.utcfromtimestamp(epoch)  # UTC for consistency
+                        current_timestamp = datetime.fromtimestamp(epoch, tz=timezone.utc)  # UTC for consistency
                 except (ValueError, OSError, OverflowError):
                     # Not a valid timestamp, might be a comment
                     pass
@@ -2735,7 +2734,7 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
             
             # Get file modification time in UTC
             try:
-                mtime = datetime.utcfromtimestamp(member.mtime)
+                mtime = datetime.fromtimestamp(member.mtime, tz=timezone.utc)
             except (OSError, ValueError, OverflowError):
                 mtime = None
             
@@ -2788,7 +2787,7 @@ def find_history_files_in_directory(base_path: str) -> List[Tuple[str, str, Opti
                     if os.path.isfile(filepath):
                         # Get file modification time in UTC
                         try:
-                            mtime = datetime.utcfromtimestamp(os.path.getmtime(filepath))
+                            mtime = datetime.fromtimestamp(os.path.getmtime(filepath), tz=timezone.utc)
                         except (OSError, ValueError, OverflowError):
                             mtime = None
                         
