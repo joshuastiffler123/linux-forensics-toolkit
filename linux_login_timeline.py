@@ -702,7 +702,7 @@ VALID_USERNAME_PATTERN = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$')
 
 # Valid IPv4 pattern: Must have 4 octets separated by dots
 VALID_IPV4_PATTERN = re.compile(
-    r'^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
+    r'^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$'
 )
 
 # Valid IPv6 pattern: Simplified - must have at least 2 colons and hex digits
@@ -759,16 +759,16 @@ def extract_ip_from_message(message: str) -> str:
     # Try to find IPv4 addresses first (more common in logs)
     ipv4_pattern = re.compile(
         r'(?:from|addr[= ]|address[= ]|src[= ]|source[= ]|client[= ])\s*'
-        r'((?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))',
+        r'((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))',
         re.IGNORECASE
     )
     match = ipv4_pattern.search(message)
     if match:
         return match.group(1)
-    
+
     # Try standalone IPv4 (less reliable but useful)
     standalone_ipv4 = re.compile(
-        r'\b((?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))\b'
+        r'\b((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))\b'
     )
     match = standalone_ipv4.search(message)
     if match:
@@ -1250,43 +1250,43 @@ ISO_TIMESTAMP_PATTERN = re.compile(
 AUTH_PATTERNS = {
     # SSH Authentication - use proper IPv4 pattern to avoid false matches
     "accepted_password": re.compile(
-        r'sshd\[(\d+)\]:\s+Accepted password for (\S+) from ((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Accepted password for (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "accepted_publickey": re.compile(
-        r'sshd\[(\d+)\]:\s+Accepted publickey for (\S+) from ((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Accepted publickey for (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "accepted_keyboard": re.compile(
-        r'sshd\[(\d+)\]:\s+Accepted keyboard-interactive.*for (\S+) from ((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Accepted keyboard-interactive.*for (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "failed_password": re.compile(
-        r'sshd\[(\d+)\]:\s+Failed password for (?:invalid user )?(\S+) from ((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Failed password for (?:invalid user )?(\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "failed_publickey": re.compile(
-        r'sshd\[(\d+)\]:\s+Failed publickey for (?:invalid user )?(\S+) from ((?:\d{1,3}\.){3}\d{1,3})',
+        r'sshd\[(\d+)\]:\s+Failed publickey for (?:invalid user )?(\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))',
         re.IGNORECASE
     ),
     "invalid_user": re.compile(
-        r'sshd\[(\d+)\]:\s+Invalid user (\S+) from ((?:\d{1,3}\.){3}\d{1,3})',
+        r'sshd\[(\d+)\]:\s+Invalid user (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))',
         re.IGNORECASE
     ),
     "connection_closed": re.compile(
-        r'sshd\[(\d+)\]:\s+Connection closed by (?:authenticating user (\S+) )?((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Connection closed by (?:authenticating user (\S+) )?((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "disconnected": re.compile(
-        r'sshd\[(\d+)\]:\s+Disconnected from (?:(?:authenticating )?user (\S+) )?((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Disconnected from (?:(?:authenticating )?user (\S+) )?((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "ssh_connection": re.compile(
-        r'sshd\[(\d+)\]:\s+Connection from ((?:\d{1,3}\.){3}\d{1,3}) port (\d+)',
+        r'sshd\[(\d+)\]:\s+Connection from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])) port (\d+)',
         re.IGNORECASE
     ),
     "ssh_received_disconnect": re.compile(
-        r'sshd\[(\d+)\]:\s+Received disconnect from ((?:\d{1,3}\.){3}\d{1,3})',
+        r'sshd\[(\d+)\]:\s+Received disconnect from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))',
         re.IGNORECASE
     ),
     
@@ -2378,11 +2378,11 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
         "user_logged_out": re.compile(r'User (\S+) logged out', re.IGNORECASE),
         "session_opened": re.compile(r'session opened for user (\S+)', re.IGNORECASE),
         "session_closed": re.compile(r'session closed for user (\S+)', re.IGNORECASE),
-        "accepted_connection": re.compile(r'Accepted (\S+) for (\S+) from ((?:\d{1,3}\.){3}\d{1,3})', re.IGNORECASE),
-        "failed_connection": re.compile(r'Failed (\S+) for (\S+) from ((?:\d{1,3}\.){3}\d{1,3})', re.IGNORECASE),
-        "invalid_user": re.compile(r'Invalid user (\S+) from ((?:\d{1,3}\.){3}\d{1,3})', re.IGNORECASE),
-        "connection_from": re.compile(r'Connection from ((?:\d{1,3}\.){3}\d{1,3})', re.IGNORECASE),
-        "disconnected_from": re.compile(r'Disconnected from (?:(?:authenticating )?user \S+ )?((?:\d{1,3}\.){3}\d{1,3})', re.IGNORECASE),
+        "accepted_connection": re.compile(r'Accepted (\S+) for (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))', re.IGNORECASE),
+        "failed_connection": re.compile(r'Failed (\S+) for (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))', re.IGNORECASE),
+        "invalid_user": re.compile(r'Invalid user (\S+) from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))', re.IGNORECASE),
+        "connection_from": re.compile(r'Connection from ((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))', re.IGNORECASE),
+        "disconnected_from": re.compile(r'Disconnected from (?:(?:authenticating )?user \S+ )?((?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9]))', re.IGNORECASE),
         "authentication_failure": re.compile(r'authentication failure.*user=(\S+)', re.IGNORECASE),
         "sudo_command": re.compile(r'(\S+)\s*:.*COMMAND=(.+)$', re.IGNORECASE),
         "cron_session": re.compile(r'CRON\[(\d+)\].*\((\S+)\)', re.IGNORECASE),
