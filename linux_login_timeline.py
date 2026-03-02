@@ -2971,7 +2971,7 @@ class LinuxLoginTimeline:
                         print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
         
         # Sort events by timestamp
-        self.events.sort(key=lambda e: e.timestamp if e.timestamp else datetime.min)
+        self.events.sort(key=lambda e: (e.timestamp.replace(tzinfo=None) if e.timestamp.tzinfo else e.timestamp) if e.timestamp else datetime.min)
         
         if verbose:
             print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
@@ -3111,7 +3111,7 @@ class LinuxLoginTimeline:
                     print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
         
         # Sort events by timestamp
-        self.events.sort(key=lambda e: e.timestamp if e.timestamp else datetime.min)
+        self.events.sort(key=lambda e: (e.timestamp.replace(tzinfo=None) if e.timestamp.tzinfo else e.timestamp) if e.timestamp else datetime.min)
         
         if verbose:
             print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
