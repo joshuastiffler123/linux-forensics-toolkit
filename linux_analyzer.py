@@ -460,7 +460,7 @@ class ForensicLogger:
     def __init__(self, log_path: str):
         self._path = log_path
         self._fh = open(log_path, 'w', encoding='utf-8')
-        self._start = datetime.utcnow()
+        self._start = datetime.now(tz=timezone.utc)
 
     # -- internal helpers -------------------------------------------------- #
 
@@ -554,7 +554,7 @@ class ForensicLogger:
 
     def write_summary(self, results: List[Dict]):
         """Final summary with prioritised review order."""
-        end = datetime.utcnow()
+        end = datetime.now(tz=timezone.utc)
         elapsed = (end - self._start).total_seconds()
 
         self._header('ANALYSIS COMPLETE')

@@ -1621,7 +1621,7 @@ def parse_syslog_timestamp(timestamp_str: str, reference_date: datetime = None) 
         datetime object or None (always offset-naive)
     """
     if reference_date is None:
-        reference_date = datetime.utcnow()
+        reference_date = datetime.now(tz=timezone.utc)
     
     reference_year = reference_date.year
     
@@ -1727,11 +1727,11 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
                 mtime = os.path.getmtime(filepath)
                 reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
             except (OSError, ValueError):
-                reference_date = datetime.utcnow()
+                reference_date = datetime.now(tz=timezone.utc)
         else:
-            # Data was provided (from tarball), use datetime.utcnow() as fallback
+            # Data was provided (from tarball), use datetime.now(tz=timezone.utc) as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.utcnow()
+            reference_date = datetime.now(tz=timezone.utc)
     
     # Helper to safely get group or empty string
     def safe_group(groups, idx, default=""):
@@ -2355,11 +2355,11 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
                 mtime = os.path.getmtime(filepath)
                 reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc)
             except (OSError, ValueError):
-                reference_date = datetime.utcnow()
+                reference_date = datetime.now(tz=timezone.utc)
         else:
-            # Data was provided (from tarball), use datetime.utcnow() as fallback
+            # Data was provided (from tarball), use datetime.now(tz=timezone.utc) as fallback
             # Note: Caller should provide reference_date for accurate forensic analysis
-            reference_date = datetime.utcnow()
+            reference_date = datetime.now(tz=timezone.utc)
     
     # Keywords that indicate login/user activity
     LOGIN_KEYWORDS = [

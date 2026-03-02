@@ -1488,7 +1488,7 @@ class JournalParser:
             
             # Determine reference date for year inference (use UTC)
             if reference_date is None:
-                reference_date = self.reference_date if self.reference_date else datetime.utcnow()
+                reference_date = self.reference_date if self.reference_date else datetime.now(tz=timezone.utc)
             
             reference_year = reference_date.year
             
@@ -1864,7 +1864,7 @@ Supported Formats:
                 pass
         
         if reference_date is None:
-            reference_date = datetime.utcnow()
+            reference_date = datetime.now(tz=timezone.utc)
             if verbose:
                 print(f"{Style.WARNING}Reference date (using current UTC - may be inaccurate):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
         
