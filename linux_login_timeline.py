@@ -27,7 +27,7 @@ Handles .gz compressed versions automatically.
 Requirements: Python 3.6+ (standard library only, no pip install needed)
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Forensics Team"
 
 import os
@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Optional, Tuple, Generator, Any, Union
+from lft_style import Style
+from lft_uac import UACHandler, is_safe_path, safe_extract_member
 import glob
 
 
@@ -72,405 +74,6 @@ def resolve_path(path: str) -> str:
     
     return absolute
 
-
-def is_safe_path(base_path: str, target_path: str) -> bool:
-    """
-    OWASP A03/A08: Validate that target_path is within base_path.
-    Prevents path traversal attacks (zip slip, tar slip).
-    
-    Args:
-        base_path: The allowed base directory
-        target_path: The path to validate
-        
-    Returns:
-        True if target_path is safely within base_path
-    """
-    # Resolve both paths to absolute paths
-    base = os.path.abspath(base_path)
-    target = os.path.abspath(target_path)
-    
-    # Ensure the target starts with the base path
-    # Use os.path.commonpath for cross-platform safety
-    try:
-        common = os.path.commonpath([base, target])
-        return common == base
-    except ValueError:
-        # On Windows, paths on different drives raise ValueError
-        return False
-
-
-def safe_extract_member(tar: tarfile.TarFile, member: tarfile.TarInfo, dest_dir: str) -> Optional[str]:
-    """
-    OWASP A08: Safely extract a tar member, preventing tar slip attacks.
-    
-    Args:
-        tar: Open tarfile object
-        member: Member to extract
-        dest_dir: Destination directory
-        
-    Returns:
-        Path to extracted file or None if unsafe
-    """
-    # Get the intended extraction path
-    member_path = os.path.join(dest_dir, member.name)
-    abs_dest = os.path.abspath(dest_dir)
-    abs_member = os.path.abspath(member_path)
-    
-    # Validate the path stays within destination
-    if not is_safe_path(abs_dest, abs_member):
-        raise ValueError(f"Attempted path traversal in tar: {member.name}")
-    
-    # Check for suspicious member attributes
-    if member.issym() or member.islnk():
-        # Skip symbolic links to prevent symlink attacks
-        return None
-    
-    tar.extract(member, dest_dir)
-    return member_path
-
-
-# ============================================================================
-# CONSOLE STYLING (matches uac_extractor.py style)
-# ============================================================================
-
-class Style:
-    """ANSI color codes for terminal output."""
-    
-    ENABLED = sys.stdout.isatty()
-    
-    RESET = '\033[0m' if ENABLED else ''
-    BOLD = '\033[1m' if ENABLED else ''
-    DIM = '\033[2m' if ENABLED else ''
-    
-    RED = '\033[91m' if ENABLED else ''
-    GREEN = '\033[92m' if ENABLED else ''
-    YELLOW = '\033[93m' if ENABLED else ''
-    BLUE = '\033[94m' if ENABLED else ''
-    MAGENTA = '\033[95m' if ENABLED else ''
-    CYAN = '\033[96m' if ENABLED else ''
-    
-    SUCCESS = GREEN
-    ERROR = RED
-    WARNING = YELLOW
-    INFO = CYAN
-    HEADER = MAGENTA
-
-    @classmethod
-    def enable_windows_ansi(cls):
-        """Enable ANSI escape sequences on Windows."""
-        if os.name == 'nt':
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-                cls.ENABLED = True
-            except (AttributeError, OSError, ValueError):
-                # OWASP A05: Specify exception types instead of bare except
-                pass
-
-
-# ============================================================================
-# UAC TARBALL HANDLER
-# ============================================================================
-
-class UACTarballHandler:
-    """
-    Handles reading files from UAC (Unix-like Artifacts Collector) tarballs.
-    
-    UAC creates tarballs with various directory structures:
-    - <hostname>/<date>/var/log/...
-    - <hostname>/collected/var/log/...
-    - var/log/...
-    - live_response/...
-    
-    This class auto-detects the structure and provides unified access.
-    """
-    
-    TAR_EXTENSIONS = ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')
-    
-    def __init__(self, tarball_path: str, verbose: bool = True):
-        """
-        Initialize the tarball handler.
-        
-        Args:
-            tarball_path: Path to the UAC tarball
-            verbose: Print progress information
-        """
-        self.tarball_path = tarball_path
-        self.verbose = verbose
-        self.tar = None
-        self.var_log_prefix = None
-        self.hostname = None
-        self.temp_dir = None
-        self._members_cache = None
-        
-    def __enter__(self):
-        self.open()
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        
-    def open(self):
-        """Open the tarball and detect structure."""
-        if self.verbose:
-            print(f"{Style.INFO}Opening UAC tarball:{Style.RESET} {self.tarball_path}", file=sys.stderr)
-        
-        # Determine compression mode
-        mode = "r:*"  # Auto-detect compression
-        
-        try:
-            self.tar = tarfile.open(self.tarball_path, mode)
-        except tarfile.ReadError:
-            # Try uncompressed
-            self.tar = tarfile.open(self.tarball_path, "r:")
-        
-        # Cache member list for efficiency
-        self._members_cache = self.tar.getmembers()
-        
-        # Detect UAC structure
-        self._detect_structure()
-        
-        if self.verbose:
-            print(f"{Style.SUCCESS}Detected var/log at:{Style.RESET} {self.var_log_prefix or 'root'}", file=sys.stderr)
-            if self.hostname:
-                print(f"{Style.INFO}Hostname:{Style.RESET} {self.hostname}", file=sys.stderr)
-    
-    def close(self):
-        """Close the tarball and cleanup."""
-        if self.tar:
-            self.tar.close()
-            self.tar = None
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def _detect_structure(self):
-        """
-        Detect the directory structure inside the UAC tarball.
-        
-        Looks for var/log directory to determine the prefix path.
-        """
-        var_log_patterns = [
-            # Direct paths
-            "var/log/",
-            # UAC standard patterns
-            r".*/var/log/",
-            r".*/collected/var/log/",
-            r".*/live_response/.*",
-        ]
-        
-        # Get all member names
-        member_names = [m.name for m in self._members_cache]
-        
-        # Find var/log path
-        for name in member_names:
-            # Normalize path separators
-            normalized = name.replace("\\", "/")
-            
-            # Check for var/log
-            if "/var/log/" in normalized or normalized.startswith("var/log/"):
-                # Extract the prefix before var/log
-                idx = normalized.find("var/log/")
-                self.var_log_prefix = normalized[:idx] if idx > 0 else ""
-                
-                # Try to extract hostname from path
-                if self.var_log_prefix:
-                    parts = self.var_log_prefix.strip("/").split("/")
-                    if parts:
-                        self.hostname = parts[0]
-                break
-        
-        # If var/log not found, check for common UAC artifacts
-        if self.var_log_prefix is None:
-            for name in member_names:
-                normalized = name.replace("\\", "/")
-                # Look for any log files that indicate structure
-                if "auth.log" in normalized or "secure" in normalized or "wtmp" in normalized:
-                    # Found a log file, extract its path prefix
-                    parts = normalized.split("/")
-                    if "log" in parts:
-                        log_idx = parts.index("log")
-                        if log_idx >= 1 and parts[log_idx - 1] == "var":
-                            self.var_log_prefix = "/".join(parts[:log_idx - 1])
-                            if self.var_log_prefix:
-                                self.var_log_prefix += "/"
-                            break
-            
-            # Default to empty prefix if still not found
-            if self.var_log_prefix is None:
-                self.var_log_prefix = ""
-    
-    def get_var_log_path(self, relative_path: str) -> str:
-        """
-        Get the full path within the tarball for a var/log relative path.
-        
-        Args:
-            relative_path: Path relative to var/log (e.g., "auth.log")
-            
-        Returns:
-            Full path within tarball
-        """
-        return f"{self.var_log_prefix}var/log/{relative_path}"
-    
-    def list_log_files(self, pattern: str = "") -> List[str]:
-        """
-        List all log files matching a pattern.
-        
-        Args:
-            pattern: Optional pattern to filter files (e.g., "auth.log")
-            
-        Returns:
-            List of full paths within tarball
-        """
-        matches = []
-        var_log_path = f"{self.var_log_prefix}var/log/"
-        
-        for member in self._members_cache:
-            name = member.name.replace("\\", "/")
-            if name.startswith(var_log_path) or f"/var/log/" in name:
-                if not pattern or pattern in os.path.basename(name):
-                    if not member.isdir():
-                        matches.append(name)
-        
-        return sorted(matches)
-    
-    def find_log_files(self, base_pattern: str) -> List[str]:
-        """
-        Find all log files matching a base pattern (including rotated/gzipped).
-        
-        Args:
-            base_pattern: Base filename pattern (e.g., "auth.log", "wtmp")
-            
-        Returns:
-            List of matching file paths
-        """
-        matches = []
-        var_log_path = f"{self.var_log_prefix}var/log/"
-        
-        for member in self._members_cache:
-            if member.isdir():
-                continue
-                
-            name = member.name.replace("\\", "/")
-            basename = os.path.basename(name)
-            
-            # Check if this is in var/log (or a subdirectory)
-            if var_log_path in name or "/var/log/" in name:
-                # Match base pattern (including rotated versions)
-                if basename == base_pattern or basename.startswith(f"{base_pattern}."):
-                    matches.append(name)
-        
-        return sorted(matches)
-    
-    def find_audit_logs(self) -> List[str]:
-        """Find all audit log files."""
-        matches = []
-        
-        for member in self._members_cache:
-            if member.isdir():
-                continue
-            
-            name = member.name.replace("\\", "/")
-            
-            # Look for audit logs in various locations
-            if "/audit/audit.log" in name or name.endswith("/audit.log"):
-                matches.append(name)
-            elif "/audit/audit.log." in name:
-                matches.append(name)
-        
-        return sorted(matches)
-    
-    def extract_file(self, member_path: str) -> Optional[bytes]:
-        """
-        Extract a file's contents from the tarball.
-        
-        Args:
-            member_path: Path within the tarball
-            
-        Returns:
-            File contents as bytes, or None if not found
-        """
-        try:
-            # Handle .gz files within the tarball
-            member = self.tar.getmember(member_path)
-            f = self.tar.extractfile(member)
-            if f:
-                data = f.read()
-                f.close()
-                
-                # If the file is gzipped, decompress it
-                if member_path.endswith('.gz'):
-                    try:
-                        data = gzip.decompress(data)
-                    except gzip.BadGzipFile:
-                        pass  # Not actually gzipped, use raw data
-                
-                return data
-        except KeyError:
-            pass
-        except Exception as e:
-            if self.verbose:
-                print(f"{Style.WARNING}Warning: Could not extract {member_path}: {e}{Style.RESET}", file=sys.stderr)
-        
-        return None
-    
-    def extract_file_to_temp(self, member_path: str) -> Optional[str]:
-        """
-        Extract a file to a temporary location.
-        
-        OWASP A08: Uses safe extraction to prevent tar slip attacks.
-        
-        Args:
-            member_path: Path within the tarball
-            
-        Returns:
-            Path to extracted file, or None if failed
-        """
-        if not self.temp_dir:
-            self.temp_dir = tempfile.mkdtemp(prefix="uac_timeline_")
-        
-        try:
-            member = self.tar.getmember(member_path)
-            
-            # OWASP A08: Safe extraction with path validation
-            extracted_path = safe_extract_member(self.tar, member, self.temp_dir)
-            return extracted_path
-            
-        except ValueError as e:
-            # Path traversal attempt detected
-            if self.verbose:
-                print(f"{Style.ERROR}Security: Blocked path traversal attempt: {member_path}{Style.RESET}", file=sys.stderr)
-        except (KeyError, tarfile.TarError, OSError) as e:
-            if self.verbose:
-                print(f"{Style.WARNING}Warning: Could not extract {member_path}: {e}{Style.RESET}", file=sys.stderr)
-        
-        return None
-    
-    def get_file_handle(self, member_path: str, binary: bool = False) -> Optional[io.IOBase]:
-        """
-        Get a file-like object for reading a file from the tarball.
-        
-        Args:
-            member_path: Path within the tarball
-            binary: Whether to return binary mode
-            
-        Returns:
-            File-like object or None
-        """
-        data = self.extract_file(member_path)
-        if data is None:
-            return None
-        
-        if binary:
-            return io.BytesIO(data)
-        else:
-            return io.StringIO(data.decode('utf-8', errors='replace'))
-
-    @staticmethod
-    def is_tarball(path: str) -> bool:
-        """Check if a path is a UAC tarball."""
-        lower_path = path.lower()
-        return any(lower_path.endswith(ext) for ext in UACTarballHandler.TAR_EXTENSIONS)
 
 
 # ============================================================================
@@ -2703,7 +2306,7 @@ def find_history_files_in_tarball(handler) -> List[Tuple[str, str, Optional[date
     Find all shell history files in a UAC tarball.
     
     Args:
-        handler: UACTarballHandler instance
+        handler: UACHandler instance
         
     Returns:
         List of tuples: (filepath, username, file_mtime)
@@ -2820,7 +2423,7 @@ class LinuxLoginTimeline:
         
         # Auto-detect if source is a tarball
         if is_tarball is None:
-            self.is_tarball = UACTarballHandler.is_tarball(source_path)
+            self.is_tarball = UACHandler.is_tarball_path(source_path)
         else:
             self.is_tarball = is_tarball
         
@@ -2846,7 +2449,7 @@ class LinuxLoginTimeline:
         """
         Style.enable_windows_ansi()
         
-        with UACTarballHandler(self.source_path, verbose=verbose) as handler:
+        with UACHandler(self.source_path, verbose=verbose) as handler:
             self.tarball_handler = handler
             self.hostname = handler.hostname
             
@@ -3289,7 +2892,7 @@ def process_batch(
     
     # Find all tarballs
     tarballs = []
-    for ext in UACTarballHandler.TAR_EXTENSIONS:
+    for ext in UACHandler.TAR_EXTENSIONS:
         tarballs.extend(glob.glob(os.path.join(source_dir, f"*{ext}")))
     
     if not tarballs:
@@ -3314,7 +2917,7 @@ def process_batch(
             
             # Generate output filename
             base_name = tarball_name
-            for ext in UACTarballHandler.TAR_EXTENSIONS:
+            for ext in UACHandler.TAR_EXTENSIONS:
                 if base_name.lower().endswith(ext):
                     base_name = base_name[:-len(ext)]
                     break

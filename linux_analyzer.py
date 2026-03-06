@@ -41,41 +41,8 @@ from typing import Dict, List, Optional, Tuple
 __version__ = "2.0.0"
 
 
-# ============================================================================
-# Console Styling
-# ============================================================================
-
-class Style:
-    """ANSI escape codes for console styling."""
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    
-    ERROR = RED
-    SUCCESS = GREEN
-    WARNING = YELLOW
-    INFO = CYAN
-    HEADER = MAGENTA
-    CRITICAL = f"{RED}{BOLD}"
-    
-    @staticmethod
-    def enable_windows_ansi():
-        """Enable ANSI escape codes on Windows."""
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-            except Exception:
-                pass
+from lft_style import Style
+from lft_uac import UACHandler
 
 
 # ============================================================================
@@ -538,11 +505,18 @@ class ForensicLogger:
             self._w(f'  Status  : SKIPPED')
             return
 
-        # Count — different analyzers use different keys
-        count = (result.get('event_count') or result.get('finding_count')
-                 or result.get('findings_count') or 0)
+        events   = result.get('event_count', 0) or 0
+        findings = result.get('finding_count', 0) or 0
         self._w(f'  Status  : OK')
-        self._w(f'  Findings: {count:,}')
+        if events and findings:
+            self._w(f'  Events  : {events:,}')
+            self._w(f'  Findings: {findings:,}')
+        elif events:
+            self._w(f'  Events  : {events:,}')
+        elif findings:
+            self._w(f'  Findings: {findings:,}')
+        else:
+            self._w(f'  Findings: 0')
 
         for f in result.get('output_files', []):
             self._w(f'  Output  : {os.path.basename(f)}')
@@ -752,22 +726,24 @@ def run_login_timeline(source_path: str, output_dir: str, hostname: str) -> Dict
         "success": False,
         "output_files": [],
         "event_count": 0,
+        "finding_count": 0,
+        "coverage": [],
         "error": None
     }
-    
+
     try:
         # Import the module
         import linux_login_timeline as llt
-        
+
         # Create timeline object
         timeline = llt.LinuxLoginTimeline(source_path)
-        
+
         # Collect events (verbose=False for parallel execution)
         if timeline.is_tarball:
             timeline._collect_from_tarball(verbose=False)
         else:
             timeline._collect_from_directory(verbose=False)
-        
+
         if timeline.events:
             # Export to CSV
             output_file = os.path.join(output_dir, f"{hostname}_login_timeline.csv")
@@ -778,14 +754,17 @@ def run_login_timeline(source_path: str, output_dir: str, hostname: str) -> Dict
         else:
             result["error"] = "No events found"
             result["success"] = True  # Not a failure, just no data
-        
+
         # Close tarball handler if used
         if timeline.tarball_handler:
             timeline.tarball_handler.close()
-            
+
     except Exception as e:
         result["error"] = str(e)
-    
+
+    # Coverage probe
+    result["coverage"] = probe_coverage(source_path, "Login Timeline",
+                                        LOGIN_TIMELINE_ARTIFACTS)
     return result
 
 
@@ -796,6 +775,8 @@ def run_journal_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         "success": False,
         "output_files": [],
         "event_count": 0,
+        "finding_count": 0,
+        "coverage": [],
         "error": None
     }
     
@@ -843,7 +824,9 @@ def run_journal_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         
     except Exception as e:
         result["error"] = str(e)
-    
+
+    result["coverage"] = probe_coverage(source_path, "Journal Analyzer",
+                                        JOURNAL_ANALYZER_ARTIFACTS)
     return result
 
 
@@ -853,30 +836,31 @@ def run_persistence_hunter(source_path: str, output_dir: str, hostname: str) -> 
         "name": "Persistence Hunter",
         "success": False,
         "output_files": [],
+        "event_count": 0,
         "finding_count": 0,
+        "coverage": [],
         "error": None
     }
-    
+
     try:
-        # Import the module
         import linux_persistence_hunter as lph
-        
-        # Run the hunter
         hunter = lph.PersistenceHunter(source_path)
         hunter.hunt(verbose=False)
-        
+
         if hunter.findings:
             output_file = os.path.join(output_dir, f"{hostname}_persistence.csv")
             hunter.export_csv(output_file)
             result["output_files"].append(output_file)
             result["finding_count"] = len(hunter.findings)
-        
+
         result["success"] = True
         hunter.close()
-        
+
     except Exception as e:
         result["error"] = str(e)
-    
+
+    result["coverage"] = probe_coverage(source_path, "Persistence Hunter",
+                                        PERSISTENCE_HUNTER_ARTIFACTS)
     return result
 
 
@@ -886,7 +870,9 @@ def run_security_analyzer(source_path: str, output_dir: str, hostname: str) -> D
         "name": "Security Analyzer",
         "success": False,
         "output_files": [],
+        "event_count": 0,
         "finding_count": 0,
+        "coverage": [],
         "error": None
     }
     
@@ -919,10 +905,12 @@ def run_security_analyzer(source_path: str, output_dir: str, hostname: str) -> D
         
         result["success"] = True
         analyzer.close()
-        
+
     except Exception as e:
         result["error"] = str(e)
-    
+
+    result["coverage"] = probe_coverage(source_path, "Security Analyzer",
+                                        SECURITY_ANALYZER_ARTIFACTS)
     return result
 
 
@@ -1003,6 +991,8 @@ def run_package_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         "success": False,
         "output_files": [],
         "event_count": 0,
+        "finding_count": 0,
+        "coverage": [],
         "error": None,
     }
     try:
@@ -1020,6 +1010,9 @@ def run_package_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         result["error"] = "linux_package_analyzer.py not found"
     except Exception as exc:
         result["error"] = str(exc)
+
+    result["coverage"] = probe_coverage(source_path, "Package Analyzer",
+                                        PACKAGE_ANALYZER_ARTIFACTS)
     return result
 
 
@@ -1029,7 +1022,9 @@ def run_network_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         "name": "Network Analyzer",
         "success": False,
         "output_files": [],
+        "event_count": 0,
         "finding_count": 0,
+        "coverage": [],
         "error": None,
     }
     try:
@@ -1052,6 +1047,9 @@ def run_network_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         result["error"] = "linux_network_analyzer.py not found"
     except Exception as exc:
         result["error"] = str(exc)
+
+    result["coverage"] = probe_coverage(source_path, "Network Analyzer",
+                                        NETWORK_ANALYZER_ARTIFACTS)
     return result
 
 
@@ -1404,6 +1402,7 @@ def run_string_analyzer(source_path: str, output_dir: str, hostname: str) -> Dic
         "output_files": [],
         "event_count": 0,
         "finding_count": 0,
+        "coverage": [],
         "error": None
     }
 
@@ -1427,6 +1426,8 @@ def run_string_analyzer(source_path: str, output_dir: str, hostname: str) -> Dic
     except Exception as e:
         result["error"] = str(e)
 
+    result["coverage"] = probe_coverage(source_path, "String Analyzer",
+                                        STRING_ANALYZER_ARTIFACTS)
     return result
 
 
@@ -1436,7 +1437,9 @@ def run_misc_artifacts(source_path: str, output_dir: str, hostname: str) -> Dict
         "name": "Misc Artifacts",
         "success": False,
         "output_files": [],
+        "event_count": 0,
         "finding_count": 0,
+        "coverage": [],
         "error": None
     }
 
@@ -1457,6 +1460,8 @@ def run_misc_artifacts(source_path: str, output_dir: str, hostname: str) -> Dict
     except Exception as e:
         result["error"] = str(e)
 
+    result["coverage"] = probe_coverage(source_path, "Misc Artifacts",
+                                        MISC_ARTIFACTS_EXPECTED)
     return result
 
 
@@ -2095,6 +2100,182 @@ def run_bodyfile_analysis(bodyfile_path: str, output_dir: str, hostname: str) ->
 
 
 # ============================================================================
+# Coverage Manifest
+# ============================================================================
+
+def probe_coverage(source_path: str, analyzer_name: str,
+                   expected_artifacts: List[Tuple[str, str, List[str]]]) -> List[Dict]:
+    """
+    Probe a UAC source for expected artifacts and return coverage entries.
+
+    Args:
+        source_path: Path to UAC tarball or directory
+        analyzer_name: Name of the analyzer (for context only)
+        expected_artifacts: List of (category, description, [path_patterns])
+            Each path_pattern is checked; FOUND if any match, NOT_FOUND if none.
+
+    Returns:
+        List of coverage dicts with keys: category, expected, status, actual, details
+    """
+    coverage = []
+    try:
+        handler = UACHandler(source_path)
+        for category, description, patterns in expected_artifacts:
+            found_files = []
+            for pattern in patterns:
+                # Try suffix-based search (quick)
+                matches = handler.find_files_by_suffix([pattern])
+                if matches:
+                    found_files.extend(m[0] for m in matches)
+                else:
+                    # Try pattern-based search
+                    matches = handler.find_files_by_pattern([pattern])
+                    if matches:
+                        found_files.extend(m[0] for m in matches)
+
+            if found_files:
+                # Deduplicate
+                unique = sorted(set(found_files))
+                detail = f"{len(unique)} file(s)"
+                actual = unique[0] if len(unique) == 1 else f"{unique[0]} (+{len(unique)-1} more)"
+                coverage.append({
+                    "category": category,
+                    "expected": description,
+                    "status": "FOUND",
+                    "actual": actual,
+                    "details": detail,
+                })
+            else:
+                coverage.append({
+                    "category": category,
+                    "expected": description,
+                    "status": "NOT_FOUND",
+                    "actual": "",
+                    "details": "",
+                })
+        handler.close()
+    except Exception:
+        pass  # Coverage probe failure should never break analysis
+    return coverage
+
+
+# Per-analyzer expected artifact definitions
+# Format: (category, expected_path_description, [search_patterns])
+LOGIN_TIMELINE_ARTIFACTS = [
+    ("Authentication Log", "/var/log/auth.log*", ["**/auth.log"]),
+    ("Authentication Log", "/var/log/secure*", ["**/secure"]),
+    ("Login Records", "/var/log/wtmp", ["**/wtmp"]),
+    ("Failed Logins", "/var/log/btmp", ["**/btmp"]),
+    ("Last Login", "/var/log/lastlog", ["**/lastlog"]),
+    ("Audit Log", "/var/log/audit/audit.log*", ["**/audit.log"]),
+    ("System Log", "/var/log/syslog*", ["**/syslog"]),
+    ("System Messages", "/var/log/messages*", ["**/messages"]),
+    ("Shell History", "/root/.bash_history", ["**/.bash_history"]),
+]
+
+PERSISTENCE_HUNTER_ARTIFACTS = [
+    ("Cron Jobs", "/etc/cron.d/*", ["**/cron.d"]),
+    ("Cron Spool", "/var/spool/cron/*", ["**/spool/cron"]),
+    ("Crontab", "/etc/crontab", ["**/crontab"]),
+    ("Systemd Services", "/etc/systemd/system/*", ["**/systemd/system"]),
+    ("Systemd User Units", "~/.config/systemd/user/*", ["**/systemd/user"]),
+    ("SSH Authorized Keys", "~/.ssh/authorized_keys", ["**/authorized_keys"]),
+    ("Shell Profiles", "/etc/profile.d/*", ["**/profile.d"]),
+    ("Bashrc Files", "/etc/bash.bashrc", ["**/bash.bashrc"]),
+    ("Init.d Scripts", "/etc/init.d/*", ["**/init.d"]),
+    ("RC Local", "/etc/rc.local", ["**/rc.local"]),
+    ("LD Preload", "/etc/ld.so.preload", ["**/ld.so.preload"]),
+    ("PAM Configuration", "/etc/pam.d/*", ["**/pam.d"]),
+    ("Sudoers", "/etc/sudoers*", ["**/sudoers"]),
+    ("Udev Rules", "/etc/udev/rules.d/*", ["**/udev/rules.d"]),
+    ("Passwd", "/etc/passwd", ["**/etc/passwd"]),
+    ("Shadow", "/etc/shadow", ["**/etc/shadow"]),
+]
+
+SECURITY_ANALYZER_ARTIFACTS = [
+    ("Temp Files", "/tmp/*", ["**/tmp"]),
+    ("Dev SHM", "/dev/shm/*", ["**/dev/shm"]),
+    ("Var Tmp", "/var/tmp/*", ["**/var/tmp"]),
+    ("Environment", "/etc/environment", ["**/etc/environment"]),
+    ("LD Library Config", "/etc/ld.so.conf", ["**/ld.so.conf"]),
+    ("Capabilities", "/proc/*/status or getcap output", ["**/getcap"]),
+]
+
+JOURNAL_ANALYZER_ARTIFACTS = [
+    ("Journal Binary", "/var/log/journal/*", ["**/journal"]),
+    ("Journal Text Export", "journal text exports", [r"\.journal$"]),
+    ("Syslog", "/var/log/syslog*", ["**/syslog"]),
+    ("Messages", "/var/log/messages*", ["**/messages"]),
+]
+
+NETWORK_ANALYZER_ARTIFACTS = [
+    ("Hosts File", "/etc/hosts", ["**/etc/hosts"]),
+    ("DNS Config", "/etc/resolv.conf", ["**/resolv.conf"]),
+    ("Firewall Logs", "iptables/nftables/ufw logs", ["**/ufw.log", "**/firewalld"]),
+    ("Web Access Logs", "Apache/Nginx access logs", ["**/access.log", "**/access_log"]),
+    ("Web Error Logs", "Apache/Nginx error logs", ["**/error.log", "**/error_log"]),
+]
+
+PACKAGE_ANALYZER_ARTIFACTS = [
+    ("DPKG Log", "/var/log/dpkg.log*", ["**/dpkg.log"]),
+    ("APT History", "/var/log/apt/history.log*", ["**/apt/history.log"]),
+    ("YUM Log", "/var/log/yum.log*", ["**/yum.log"]),
+    ("DNF Log", "/var/log/dnf.log*", ["**/dnf.log"]),
+    ("Pacman Log", "/var/log/pacman.log*", ["**/pacman.log"]),
+    ("Zypper Log", "/var/log/zypper.log*", ["**/zypper.log"]),
+]
+
+STRING_ANALYZER_ARTIFACTS = [
+    ("Compressed Logs", "*.xz, *.bz2, *.gz log files", ["**/var/log"]),
+]
+
+MISC_ARTIFACTS_EXPECTED = [
+    ("Archive Files", "Embedded archives (.zip, .7z, .rar, .tar.gz)", ["**/tmp", "**/var/tmp"]),
+    ("Hidden Directories", "Directories starting with .", ["**/tmp"]),
+    ("Scheduled Tasks", "at/cron/systemd timer configs", ["**/cron", "**/at"]),
+]
+
+
+def write_coverage_csv(output_dir: str, hostname: str, results: List[Dict]) -> Optional[str]:
+    """
+    Write a coverage manifest CSV showing what each analyzer examined.
+
+    Analysts use this to verify that all expected artifacts were checked and
+    to identify gaps in collection coverage.
+
+    Columns:
+        Analyzer, Category, Expected_Path, Status, Actual_Path, Details
+    """
+    rows = []
+    for result in results:
+        name = result.get("name", "Unknown")
+        for entry in result.get("coverage", []):
+            rows.append({
+                "Analyzer": name,
+                "Category": entry.get("category", ""),
+                "Expected_Path": entry.get("expected", ""),
+                "Status": entry.get("status", ""),
+                "Actual_Path": entry.get("actual", ""),
+                "Details": entry.get("details", ""),
+            })
+
+    if not rows:
+        return None
+
+    output_file = os.path.join(output_dir, f"{hostname}_coverage.csv")
+    fieldnames = ["Analyzer", "Category", "Expected_Path", "Status",
+                  "Actual_Path", "Details"]
+    try:
+        with open(output_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        return output_file
+    except Exception:
+        return None
+
+
+# ============================================================================
 # Main Orchestrator
 # ============================================================================
 
@@ -2473,6 +2654,23 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     audit.write_summary(results)
     audit.close()
 
+    # Write coverage manifest CSV
+    coverage_file = write_coverage_csv(output_dir, hostname, results)
+    if coverage_file and verbose:
+        cov_found = sum(
+            1 for r in results for e in r.get("coverage", [])
+            if e.get("status") == "FOUND"
+        )
+        cov_missing = sum(
+            1 for r in results for e in r.get("coverage", [])
+            if e.get("status") == "NOT_FOUND"
+        )
+        print(
+            f"\n{Style.INFO}Coverage Manifest:{Style.RESET} "
+            f"{cov_found} artifacts found, {cov_missing} not found",
+            file=sys.stderr,
+        )
+
     end_time = datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     # Create summary report
@@ -2544,22 +2742,20 @@ This script runs all Linux forensic analysis tools in parallel and outputs
 results to a unified analysis folder named [hostname]_analysis.
 
 Included Analyzers:
-  • MAC Timeline        - Filesystem timeline from Sleuth Kit bodyfile (M/A/C/B times)
-  • Login Timeline      - Authentication/login events from logs
-  • Journal Analyzer    - Systemd journal entries
-  • Persistence Hunter  - MITRE ATT&CK mapped persistence mechanisms
-  • Security Analyzer   - Binary/environment security issues
-  • Memory Analyzer     - Volatility 3 memory forensics (optional)
-
   • Login Timeline       - Authentication/login events from logs
   • Journal Analyzer     - Systemd journal entries
   • Persistence Hunter   - MITRE ATT&CK mapped persistence mechanisms
   • Security Analyzer    - Binary/environment security issues
+  • Package Analyzer     - Package manager log analysis (dpkg, apt, yum, etc.)
+  • Network Analyzer     - Network artifacts (hosts, DNS, firewall, web logs)
   • Filesystem Timeline  - Bodyfile/mactime filesystem timeline generation
   • String Analyzer      - Log carving & string extraction (audit, syslog, web)
   • Misc Artifacts       - Archive files, hidden dirs, scheduled tasks
   • IOC Scanner          - IOC string matching (optional, requires -i flag)
   • Memory Analyzer      - Volatility 3 memory forensics (optional)
+
+Output includes a coverage manifest ([hostname]_coverage.csv) showing
+exactly which artifacts were found and which were missing from the collection.
 
 Supported Input Types:
   • UAC tarball (.tar.gz, .tar, .tgz, .tar.bz2, .tar.xz)
@@ -2730,12 +2926,15 @@ Output:
 
     if not os.path.exists(source_path):
         print(f"{Style.ERROR}Error: Source not found: {source_path}{Style.RESET}", file=sys.stderr)
+        print(f"{Style.DIM}  Expected: UAC tarball (.tar.gz, .tgz, .tar.bz2, .tar.xz),{Style.RESET}", file=sys.stderr)
+        print(f"{Style.DIM}  extracted UAC directory, or directory containing tarballs.{Style.RESET}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Resolve memory path if provided
     memory_path = os.path.abspath(args.memory) if args.memory else None
     if memory_path and not os.path.exists(memory_path):
         print(f"{Style.ERROR}Error: Memory image not found: {memory_path}{Style.RESET}", file=sys.stderr)
+        print(f"{Style.DIM}  Expected: .lime, .raw, .vmem, or other memory dump format.{Style.RESET}", file=sys.stderr)
         sys.exit(1)
 
     # Resolve bodyfile path
@@ -2746,6 +2945,14 @@ Output:
         if not os.path.isfile(bp):
             print(
                 f"{Style.ERROR}Error: Bodyfile not found: {bp}{Style.RESET}",
+                file=sys.stderr,
+            )
+            print(
+                f"{Style.DIM}  Expected: Sleuth Kit bodyfile (MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime).{Style.RESET}",
+                file=sys.stderr,
+            )
+            print(
+                f"{Style.DIM}  Generate with: fls -r -m / /dev/sdX > bodyfile.txt{Style.RESET}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -2761,6 +2968,10 @@ Output:
         if not os.path.isfile(ioc_path):
             print(
                 f"{Style.ERROR}Error: IOC file not found: {ioc_path}{Style.RESET}",
+                file=sys.stderr,
+            )
+            print(
+                f"{Style.DIM}  Expected: Plain text, one IOC per line (IPs, domains, MD5/SHA256 hashes, paths).{Style.RESET}",
                 file=sys.stderr,
             )
             sys.exit(1)

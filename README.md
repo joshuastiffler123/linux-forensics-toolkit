@@ -124,6 +124,8 @@ results into a single `[hostname]_analysis/` directory.
 | `linux_security_analyzer.py` | Suspicious binaries, rootkit traces, SUID/world-writable files, environment anomalies | `_security_*.csv` |
 | `linux_package_analyzer.py` | dpkg, apt, yum, dnf, pacman install/remove logs — flags attacker tooling | `_packages.csv` |
 | `linux_network_analyzer.py` | /etc/hosts, resolv.conf, TCP wrappers, UFW logs, ARP cache, Apache/Nginx access logs — flags webshell hits, injection URIs, suspicious UAs | `_network.csv`, `_web_access.csv` |
+| `linux_string_analyzer.py` | Log carving from compressed/raw files: audit, syslog, web log entries | `_strings.csv` |
+| `linux_misc_artifacts.py` | Archive files (by magic bytes), hidden directories, scheduled task configs | `_misc_artifacts.csv` |
 
 ### Filesystem Timeline (optional)
 
@@ -143,6 +145,7 @@ Two post-processing steps run automatically after the main analyzers finish:
 |------|--------|
 | **Log gap detection** | Scans the login timeline for suspicious quiet periods (default threshold: 6 hours) → `_log_gaps.csv` |
 | **IOC matching** (`--ioc` required) | Cross-references every generated CSV against supplied indicators → `_ioc_hits.csv` |
+| **Coverage manifest** | Shows exactly which artifacts each analyzer searched for and whether they were found → `_coverage.csv` |
 
 ### Memory Forensics (optional)
 
@@ -198,8 +201,12 @@ Hits are written to `[hostname]_ioc_hits.csv` with columns:
 ├── [hostname]_web_access.csv         # Scored web access log events
 ├── [hostname]_mac_timeline.csv       # MAC timeline (if bodyfile available)
 ├── [hostname]_log_gaps.csv           # Suspicious log quiet periods
+├── [hostname]_strings.csv            # Carved log entries from compressed files
+├── [hostname]_misc_artifacts.csv     # Archives, hidden dirs, scheduled tasks
 ├── [hostname]_ioc_hits.csv           # IOC matches (if --ioc provided)
+├── [hostname]_coverage.csv           # Coverage manifest — what was examined
 ├── [hostname]_analysis_summary.txt   # Human-readable summary report
+├── [hostname]_audit.log              # Forensic audit log (chain of custody)
 └── memory_analysis/                  # (if -m provided)
     ├── pslist.csv
     ├── sockstat.csv
@@ -216,6 +223,34 @@ Hits are written to `[hostname]_ioc_hits.csv` with columns:
 | Disk forensics | Python 3.8+ — standard library only |
 | Memory forensics | Python 3.8+, Volatility 3, matching kernel symbols |
 | Install script | bash, pip |
+
+---
+
+## Coverage Manifest
+
+Every analysis run produces a `_coverage.csv` file showing exactly which
+artifacts each analyzer searched for and whether they were present in the
+collection. This lets analysts:
+
+- **Verify completeness** — see at a glance what the toolkit checked
+- **Identify collection gaps** — filter by `Status = NOT_FOUND` to spot missing artifacts
+- **Compare against raw evidence** — cross-reference with the actual UAC collection
+
+Columns: `Analyzer`, `Category`, `Expected_Path`, `Status`, `Actual_Path`, `Details`
+
+---
+
+## Architecture
+
+The toolkit uses two shared utility modules to avoid code duplication:
+
+| Module | Purpose |
+|--------|---------|
+| `lft_style.py` | ANSI console styling with auto-TTY detection |
+| `lft_uac.py` | Unified UAC tarball/directory handler with coverage tracking |
+
+All 12 analyzer modules import from these shared modules rather than
+duplicating common logic.
 
 ---
 
