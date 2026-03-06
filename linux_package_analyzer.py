@@ -27,11 +27,11 @@ import os
 import re
 import sys
 import tarfile
-import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from lft_uac import UACHandler
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 
 # ============================================================================
@@ -149,126 +149,6 @@ class PackageEvent:
             'Suspicion_Reason': self.suspicion_reason,
             'Raw_Entry':        self.raw_entry[:400],
         }
-
-
-# ============================================================================
-# UAC Source Handler
-# ============================================================================
-
-class UACHandler:
-    """Uniform access to UAC tarballs and extracted directory trees."""
-
-    _TAR_EXTS = ('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz')
-
-    def __init__(self, source_path: str):
-        self.source_path = source_path
-        self.is_tarball = any(source_path.lower().endswith(e) for e in self._TAR_EXTS)
-        self._tar: Optional[tarfile.TarFile] = None
-        if self.is_tarball:
-            self._open_tar()
-
-    def _open_tar(self):
-        sp = self.source_path.lower()
-        if sp.endswith(('.gz', '.tgz')):
-            self._tar = tarfile.open(self.source_path, 'r:gz')
-        elif sp.endswith('.bz2'):
-            self._tar = tarfile.open(self.source_path, 'r:bz2')
-        elif sp.endswith('.xz'):
-            self._tar = tarfile.open(self.source_path, 'r:xz')
-        else:
-            self._tar = tarfile.open(self.source_path, 'r')
-
-    def close(self):
-        if self._tar:
-            try:
-                self._tar.close()
-            except Exception:
-                pass
-        self._tar = None
-
-    # ------------------------------------------------------------------
-    # File discovery
-    # ------------------------------------------------------------------
-
-    def find_files(self, suffixes: List[str]) -> List[Tuple[str, str]]:
-        """
-        Locate and read text files whose paths end with any of *suffixes*.
-        Returns list of (relative_path, text_content).
-        """
-        if self.is_tarball:
-            return self._find_in_tar(suffixes)
-        return self._find_in_dir(suffixes)
-
-    def _find_in_tar(self, suffixes: List[str]) -> List[Tuple[str, str]]:
-        if not self._tar:
-            return []
-        results = []
-        for member in self._tar.getmembers():
-            if not member.isfile():
-                continue
-            norm = member.name.lstrip('./')
-            for suf in suffixes:
-                if self._matches(norm, suf):
-                    content = self._read_tar_member(member)
-                    if content is not None:
-                        results.append((norm, content))
-                    break
-        return results
-
-    def _find_in_dir(self, suffixes: List[str]) -> List[Tuple[str, str]]:
-        results = []
-        base = self.source_path
-        base_depth = base.count(os.sep)
-        for root, dirs, files in os.walk(base):
-            if root.count(os.sep) - base_depth > 9:
-                dirs.clear()
-                continue
-            for fname in files:
-                full = os.path.join(root, fname)
-                rel = os.path.relpath(full, base).replace('\\', '/')
-                for suf in suffixes:
-                    if self._matches(rel, suf):
-                        content = self._read_file(full)
-                        if content is not None:
-                            results.append((rel, content))
-                        break
-        return results
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _read_tar_member(self, member: tarfile.TarInfo) -> Optional[str]:
-        assert self._tar is not None
-        try:
-            fobj = self._tar.extractfile(member)
-            if fobj is None:
-                return None
-            raw = fobj.read()
-            if member.name.endswith('.gz'):
-                raw = gzip.decompress(raw)
-            return raw.decode('utf-8', errors='replace')
-        except Exception:
-            return None
-
-    @staticmethod
-    def _read_file(path: str) -> Optional[str]:
-        try:
-            if path.endswith('.gz'):
-                with gzip.open(path, 'rt', encoding='utf-8', errors='replace') as f:
-                    return f.read()
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                return f.read()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _matches(path: str, suffix: str) -> bool:
-        """Match path against suffix pattern (leading * allowed)."""
-        path = path.replace('\\', '/')
-        if suffix.startswith('*'):
-            return path.endswith(suffix.lstrip('*'))
-        return path == suffix or path.endswith('/' + suffix)
 
 
 # ============================================================================
@@ -578,7 +458,7 @@ class PackageAnalyzer:
         pairs: List[Tuple[str, str, str]] = []  # (source, path, content)
 
         for src_type, pattern in self._PATTERNS:
-            for path, content in self.handler.find_files([pattern]):
+            for path, content in self.handler.find_files_by_suffix([pattern]):
                 if path not in seen and content.strip():
                     seen[path] = src_type
                     pairs.append((src_type, path, content))

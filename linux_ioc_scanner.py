@@ -24,7 +24,7 @@ License: MIT
 Requirements: Python 3.6+ (standard library only)
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 import argparse
 import bz2
@@ -41,35 +41,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 
-# ============================================================================
-# Console Styling
-# ============================================================================
-
-class Style:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    ERROR = "\033[31m"
-    SUCCESS = "\033[32m"
-    WARNING = "\033[33m"
-    INFO = "\033[36m"
-    HEADER = "\033[35m"
-
-    @staticmethod
-    def enable_windows_ansi():
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-            except Exception:
-                pass
+from lft_style import Style
 
 
 # ============================================================================

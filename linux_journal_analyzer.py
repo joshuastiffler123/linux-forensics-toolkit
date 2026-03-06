@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Any
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 
 # Optional LZ4 support for compressed binary journals
 try:
@@ -54,41 +54,9 @@ except ImportError:
 DEFAULT_MAX_MESSAGE_LENGTH = 50000  # 50KB - enough for base64 payloads
 
 
-# ============================================================================
-# Console Styling
-# ============================================================================
+from lft_style import Style
+from lft_uac import UACHandler
 
-class Style:
-    """ANSI escape codes for console styling."""
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    WHITE = "\033[37m"
-    
-    HEADER = "\033[95m"
-    SUCCESS = GREEN
-    WARNING = YELLOW
-    ERROR = RED
-    INFO = CYAN
-    CRITICAL = "\033[91m"
-    
-    @staticmethod
-    def enable_windows_ansi():
-        """Enable ANSI escape codes on Windows."""
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-            except Exception:
-                pass
 
 
 # ============================================================================
@@ -619,168 +587,6 @@ SECURITY_UNITS = {
 }
 
 
-# ============================================================================
-# UAC Tarball Handler
-# ============================================================================
-
-class UACHandler:
-    """Handle UAC tarball extraction and file access."""
-    
-    TAR_EXTENSIONS = ('.tar.gz', '.tgz', '.tar.bz2', '.tar', '.tar.xz')
-    
-    def __init__(self, source_path: str):
-        self.source_path = os.path.abspath(source_path) if source_path else None
-        self.is_tarball = False
-        self.tar = None
-        self.hostname = None
-        self._member_cache = {}
-        self._prefix = ""
-        
-        if source_path and os.path.isfile(source_path):
-            if any(source_path.lower().endswith(ext) for ext in self.TAR_EXTENSIONS):
-                self.is_tarball = True
-                self._open_tarball()
-        
-        # Extract hostname
-        self._extract_hostname()
-    
-    def _open_tarball(self):
-        """Open the tarball for reading."""
-        try:
-            if self.source_path.endswith('.tar.gz') or self.source_path.endswith('.tgz'):
-                self.tar = tarfile.open(self.source_path, 'r:gz')
-            elif self.source_path.endswith('.tar.bz2'):
-                self.tar = tarfile.open(self.source_path, 'r:bz2')
-            elif self.source_path.endswith('.tar.xz'):
-                self.tar = tarfile.open(self.source_path, 'r:xz')
-            else:
-                self.tar = tarfile.open(self.source_path, 'r')
-            
-            # Cache members and find prefix
-            members = self.tar.getmembers()
-            for member in members:
-                self._member_cache[member.name] = member
-                # Detect UAC-style prefix
-                if '/var/log/' in member.name and not self._prefix:
-                    idx = member.name.find('/var/log/')
-                    self._prefix = member.name[:idx+1] if idx > 0 else ""
-                    
-        except Exception as e:
-            print(f"{Style.ERROR}Error opening tarball: {e}{Style.RESET}", file=sys.stderr)
-            self.tar = None
-    
-    def _extract_hostname(self):
-        """Extract hostname from tarball name or system files."""
-        if self.is_tarball and self.source_path:
-            basename = os.path.basename(self.source_path)
-            for ext in self.TAR_EXTENSIONS:
-                if basename.lower().endswith(ext):
-                    basename = basename[:-len(ext)]
-                    break
-            # UAC format often: hostname-uac-timestamp
-            for sep in ['-uac', '_uac', '-', '_']:
-                if sep in basename.lower():
-                    self.hostname = basename.split(sep)[0]
-                    break
-            if not self.hostname:
-                self.hostname = basename
-        elif self.source_path and os.path.isdir(self.source_path):
-            # Try to read from hostname file
-            hostname_file = os.path.join(self.source_path, 'etc', 'hostname')
-            if os.path.exists(hostname_file):
-                try:
-                    with open(hostname_file, 'r') as f:
-                        self.hostname = f.read().strip()
-                except:
-                    pass
-            if not self.hostname:
-                self.hostname = os.path.basename(self.source_path.rstrip('/\\'))
-        
-        if not self.hostname:
-            self.hostname = "unknown"
-    
-    def get_file(self, filepath: str) -> Optional[bytes]:
-        """Get file contents from tarball or directory."""
-        if self.is_tarball and self.tar:
-            # Try various path combinations
-            paths_to_try = [
-                filepath,
-                self._prefix + filepath,
-                self._prefix + filepath.lstrip('/'),
-                filepath.lstrip('/'),
-            ]
-            
-            for path in paths_to_try:
-                if path in self._member_cache:
-                    try:
-                        f = self.tar.extractfile(self._member_cache[path])
-                        if f:
-                            return f.read()
-                    except:
-                        pass
-            return None
-        elif self.source_path:
-            full_path = os.path.join(self.source_path, filepath.lstrip('/'))
-            if os.path.isfile(full_path):
-                try:
-                    with open(full_path, 'rb') as f:
-                        return f.read()
-                except:
-                    pass
-        return None
-    
-    def find_files(self, patterns: List[str]) -> Iterator[Tuple[str, Any]]:
-        """Find files matching patterns."""
-        if self.is_tarball and self.tar:
-            for name, member in self._member_cache.items():
-                if member.isfile():
-                    for pattern in patterns:
-                        if pattern in name or re.search(pattern, name):
-                            yield name, member
-                            break
-        elif self.source_path and os.path.isdir(self.source_path):
-            for root, dirs, files in os.walk(self.source_path):
-                for filename in files:
-                    filepath = os.path.join(root, filename)
-                    rel_path = os.path.relpath(filepath, self.source_path)
-                    for pattern in patterns:
-                        if pattern in rel_path or re.search(pattern, rel_path):
-                            yield rel_path, filepath
-                            break
-    
-    def list_directory(self, dirpath: str) -> List[str]:
-        """List files in a directory."""
-        files = []
-        dirpath = dirpath.rstrip('/')
-        
-        if self.is_tarball and self.tar:
-            for name in self._member_cache:
-                # Check various path formats
-                check_paths = [dirpath, self._prefix + dirpath, self._prefix + dirpath.lstrip('/')]
-                for check_path in check_paths:
-                    if name.startswith(check_path + '/') or name.startswith(check_path.lstrip('/') + '/'):
-                        if self._member_cache[name].isfile():
-                            files.append(name)
-                        break
-        elif self.source_path:
-            full_path = os.path.join(self.source_path, dirpath.lstrip('/'))
-            if os.path.isdir(full_path):
-                try:
-                    for item in os.listdir(full_path):
-                        item_path = os.path.join(full_path, item)
-                        if os.path.isfile(item_path):
-                            files.append(os.path.join(dirpath, item))
-                except:
-                    pass
-        
-        return files
-    
-    def close(self):
-        """Close the tarball if open."""
-        if self.tar:
-            self.tar.close()
-            self.tar = None
-
 
 # ============================================================================
 # Journal Parsers
@@ -822,10 +628,10 @@ class JournalParser:
         for pattern, fmt in journal_sources:
             if fmt == "binary":
                 # Look for binary journal files
-                for filepath, _ in self.handler.find_files([r'\.journal$', pattern]):
+                for filepath, _ in self.handler.find_files_by_pattern([r'\.journal$', pattern]):
                     self._parse_binary_journal(filepath)
             else:
-                for filepath, _ in self.handler.find_files([pattern]):
+                for filepath, _ in self.handler.find_files_by_pattern([pattern]):
                     data = self.handler.get_file(filepath)
                     if data:
                         if fmt == "json":

@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.2.0"
+__version__ = "2.0.0"
 
 # ISF Server URLs for automatic symbol downloading
 ISF_SERVERS = [
@@ -322,39 +322,7 @@ Prerequisites:
 """)
 
 
-# ============================================================================
-# Console Styling
-# ============================================================================
-
-class Style:
-    """ANSI escape codes for console styling."""
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    
-    RED = "\033[31m"
-    GREEN = "\033[32m"
-    YELLOW = "\033[33m"
-    BLUE = "\033[34m"
-    MAGENTA = "\033[35m"
-    CYAN = "\033[36m"
-    
-    ERROR = RED
-    SUCCESS = GREEN
-    WARNING = YELLOW
-    INFO = CYAN
-    HEADER = MAGENTA
-    
-    @staticmethod
-    def enable_windows_ansi():
-        """Enable ANSI escape codes on Windows."""
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
-            except Exception:
-                pass
+from lft_style import Style
 
 
 # ============================================================================
