@@ -941,26 +941,25 @@ def run_memory_analyzer(memory_path: str, output_dir: str, hostname: str,
         memory_output_dir = os.path.join(output_dir, "memory_analysis")
         os.makedirs(memory_output_dir, exist_ok=True)
         
-        # Create analyzer
+        # Create analyzer (online by default to allow ISF symbol downloads)
         analyzer = lma.LinuxMemoryAnalyzer(
             image_path=memory_path,
             output_dir=memory_output_dir,
             symbol_dirs=symbol_dirs,
-            offline=True  # Don't try to download symbols
         )
-        
+
         # Validate
         valid, msg = analyzer.validate()
         if not valid:
             result["error"] = msg
             return result
-        
+
         # Run analysis
         if quick:
             # Quick triage mode
             lma.quick_triage(memory_path, symbol_dirs=symbol_dirs, verbose=False)
         else:
-            analyzer.analyze(include_optional=False, verbose=False, skip_symbol_check=True)
+            analyzer.analyze(include_optional=False, verbose=False)
         
         # Count output files
         if os.path.exists(memory_output_dir):

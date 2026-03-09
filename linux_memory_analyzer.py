@@ -389,6 +389,13 @@ OPTIONAL_PLUGINS = {
     ],
 }
 
+# Plugins that work WITHOUT kernel symbol tables
+NO_SYMBOL_PLUGINS = {
+    "Kernel Identification (no symbols required)": [
+        ("banners.Banners", "banners.csv", "Identifies kernel version from memory"),
+    ],
+}
+
 
 # ============================================================================
 # Volatility Runner
@@ -561,57 +568,126 @@ class VolatilityRunner:
             if verbose:
                 print(f"{Style.WARNING}Error: {e}{Style.RESET}")
             return None
-    
-    def check_symbols(self, verbose: bool = True) -> Tuple[bool, str]:
+
+    def _extract_kernel_version(self) -> Optional[str]:
         """
-        Check if symbols are available for this image by running a simple plugin.
-        
+        Extract the kernel version string from the detected banner.
+
+        Example banner: "Linux version 5.15.0-91-generic (buildd@...) ..."
+        Returns: "5.15.0-91-generic"
+        """
+        if not self.kernel_banner:
+            return None
+        match = re.search(r'Linux version (\S+)', self.kernel_banner)
+        return match.group(1) if match else None
+
+    def _test_symbols_with_cmd(self, base_cmd: List[str]) -> Tuple[bool, str]:
+        """
+        Test if symbols are available by running linux.pslist.PsList.
+
+        This plugin requires full symbol tables and fails fast with a clear
+        error when they are missing, making it a reliable probe.
+
         Returns:
-            Tuple of (symbols_available, message)
+            Tuple of (available, message)
         """
-        if verbose:
-            print(f"{Style.INFO}Checking symbol table availability...{Style.RESET}", end=" ", flush=True)
-        
         try:
-            # Try linux.vmcoreinfo which needs symbols
-            cmd = self._build_base_cmd() + ['linux.vmcoreinfo.VMCoreInfo']
-            
+            cmd = base_cmd + ['linux.pslist.PsList']
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=120
+                timeout=180
             )
-            
-            stderr = result.stderr.lower()
-            
+
+            stderr_lower = result.stderr.lower()
+
             # Check for symbol-related errors
-            if 'symbol_table_name' in stderr or 'unsatisfied requirement' in stderr:
-                self.symbols_found = False
-                if verbose:
-                    print(f"{Style.ERROR}NOT FOUND{Style.RESET}")
-                return False, "Symbol tables not found for this kernel"
-            
+            if any(marker in stderr_lower for marker in [
+                'symbol_table_name',
+                'unsatisfied requirement',
+                'unable to validate',
+                'no suitable symbol table',
+            ]):
+                return False, "Symbol tables not found"
+
             if result.returncode == 0:
-                self.symbols_found = True
-                if verbose:
-                    print(f"{Style.SUCCESS}Available{Style.RESET}")
                 return True, "Symbols available"
-            
-            # Other error
-            self.symbols_found = False
-            if verbose:
-                print(f"{Style.WARNING}Unknown{Style.RESET}")
+
+            # Non-symbol error — symbols may exist but plugin had another issue
+            if 'symbol' not in stderr_lower and 'isf' not in stderr_lower:
+                return True, "Plugin ran (non-symbol error)"
+
             return False, result.stderr[:200]
-            
+
         except subprocess.TimeoutExpired:
-            if verbose:
-                print(f"{Style.WARNING}Timeout{Style.RESET}")
-            return False, "Timeout checking symbols"
+            return False, "Timeout testing symbols"
         except Exception as e:
-            if verbose:
-                print(f"{Style.WARNING}Error{Style.RESET}")
             return False, str(e)
+
+    def resolve_symbols(self, verbose: bool = True) -> Tuple[bool, str]:
+        """
+        Attempt to resolve symbol tables using multiple strategies.
+
+        Strategy order:
+        1. Try with current settings (local symbol dirs + Volatility defaults)
+        2. Try each known ISF server explicitly with -u flag
+        3. Give up with actionable guidance
+
+        Returns:
+            Tuple of (symbols_resolved, message)
+        """
+        if verbose:
+            print(f"\n{Style.INFO}Resolving symbol tables...{Style.RESET}")
+
+        # Strategy 1: Try with current settings (local dirs + Volatility built-in ISF)
+        if verbose:
+            print(f"  {Style.DIM}Trying local symbols + Volatility defaults...{Style.RESET}",
+                  end=" ", flush=True)
+
+        resolved, msg = self._test_symbols_with_cmd(self._build_base_cmd())
+        if resolved:
+            if verbose:
+                print(f"{Style.SUCCESS}OK{Style.RESET}")
+            self.symbols_found = True
+            return True, "Symbols resolved with default configuration"
+
+        if verbose:
+            print(f"{Style.WARNING}not found{Style.RESET}")
+
+        # Strategy 2: Try each ISF server explicitly
+        if not self.offline:
+            for isf_url in ISF_SERVERS:
+                if verbose:
+                    print(f"  {Style.DIM}Trying ISF server: {isf_url}...{Style.RESET}",
+                          end=" ", flush=True)
+
+                cmd = [self.vol_path, '-f', self.image_path]
+                for sym_dir in self.symbol_dirs:
+                    if os.path.isdir(sym_dir):
+                        cmd.extend(['-s', sym_dir])
+                cmd.extend(['-u', isf_url])
+
+                resolved, msg = self._test_symbols_with_cmd(cmd)
+                if resolved:
+                    if verbose:
+                        print(f"{Style.SUCCESS}OK{Style.RESET}")
+                    # Store working ISF URL for subsequent plugin runs
+                    self.isf_url = isf_url
+                    self.symbols_found = True
+                    return True, f"Symbols resolved via ISF server: {isf_url}"
+
+                if verbose:
+                    print(f"{Style.WARNING}not found{Style.RESET}")
+
+        # All strategies exhausted
+        self.symbols_found = False
+        return False, "Symbol tables could not be resolved"
+
+    # Backward-compatible alias
+    def check_symbols(self, verbose: bool = True) -> Tuple[bool, str]:
+        """Check symbol availability. Delegates to resolve_symbols()."""
+        return self.resolve_symbols(verbose)
     
     def run_plugin(self, plugin: str, output_file: str, description: str = "",
                    verbose: bool = True) -> Tuple[bool, str]:
@@ -775,145 +851,224 @@ class LinuxMemoryAnalyzer:
         
         return True, "Validation passed"
     
-    def analyze(self, include_optional: bool = False, verbose: bool = True, 
+    def analyze(self, include_optional: bool = False, verbose: bool = True,
                 skip_symbol_check: bool = False) -> Dict:
         """
         Run full memory analysis.
-        
+
         Args:
             include_optional: Whether to include optional plugins
             verbose: Whether to print progress
             skip_symbol_check: Skip initial symbol availability check
-        
+
         Returns:
             Dict of results
         """
         self.start_time = datetime.now()
-        
+
         # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
         if verbose:
             print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
             print(f"{Style.HEADER}{Style.BOLD}  Linux Memory Analyzer v{__version__}{Style.RESET}")
             print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
             print(f"\n{Style.INFO}Image:{Style.RESET} {self.image_path}")
             print(f"{Style.INFO}Output:{Style.RESET} {self.output_dir}")
-            
+
             size_mb = os.path.getsize(self.image_path) / (1024 * 1024)
             print(f"{Style.INFO}Image Size:{Style.RESET} {size_mb:.1f} MB")
-        
+
         # Step 1: Detect kernel banner (works without symbols)
         banner = self.vol_runner.detect_kernel_banner(verbose)
-        
-        # Step 2: Check if symbols are available (unless skipped)
+
+        # Step 2: Resolve symbols using multiple strategies (unless skipped)
+        symbols_ok = False
         if not skip_symbol_check:
-            symbols_ok, symbols_msg = self.vol_runner.check_symbols(verbose)
-            
-            if not symbols_ok and verbose:
+            symbols_ok, symbols_msg = self.vol_runner.resolve_symbols(verbose)
+
+            if not symbols_ok:
                 self._print_symbol_guidance(banner)
-        
-        # Build plugin list
-        plugins_to_run = dict(VOLATILITY_PLUGINS)
-        if include_optional:
-            plugins_to_run.update(OPTIONAL_PLUGINS)
-        
-        # Run all plugins
-        if verbose:
-            print(f"\n{Style.INFO}Running plugins (Volatility will attempt to download symbols automatically)...{Style.RESET}")
-        
+        else:
+            # When skipped, optimistically assume symbols might work
+            symbols_ok = True
+
+        # Step 3: Choose plugin set based on symbol availability
+        if symbols_ok:
+            plugins_to_run = dict(VOLATILITY_PLUGINS)
+            if include_optional:
+                plugins_to_run.update(OPTIONAL_PLUGINS)
+
+            total = sum(len(p) for p in plugins_to_run.values())
+            if verbose:
+                print(f"\n{Style.INFO}Running {total} plugins...{Style.RESET}")
+        else:
+            # Symbols unavailable — only run plugins that don't need them
+            plugins_to_run = dict(NO_SYMBOL_PLUGINS)
+
+            full_count = sum(len(p) for p in VOLATILITY_PLUGINS.values())
+            no_sym_count = sum(len(p) for p in NO_SYMBOL_PLUGINS.values())
+            skipped = full_count - no_sym_count
+            if verbose:
+                print(f"\n{Style.WARNING}Skipping {skipped} symbol-dependent plugins.{Style.RESET}")
+                print(f"{Style.INFO}Running {no_sym_count} plugin(s) that work without symbols...{Style.RESET}")
+
+        # Run selected plugins
         results = self.vol_runner.run_all_plugins(plugins_to_run, verbose)
-        
+
         self.end_time = datetime.now()
-        
+
         # Generate summary
-        self._generate_summary(verbose)
-        
+        self._generate_summary(verbose, symbols_available=symbols_ok)
+
         return results
     
     def _print_symbol_guidance(self, banner: Optional[str] = None):
-        """Print guidance for obtaining symbol tables."""
+        """Print actionable guidance for obtaining symbol tables."""
+        kernel_version = self.vol_runner._extract_kernel_version()
+
         print(f"\n{Style.WARNING}{'='*60}{Style.RESET}")
         print(f"{Style.WARNING}  Symbol Tables Not Found{Style.RESET}")
         print(f"{Style.WARNING}{'='*60}{Style.RESET}")
-        
-        if banner:
-            print(f"\n{Style.INFO}Detected Kernel:{Style.RESET}")
+
+        if kernel_version:
+            print(f"\n{Style.INFO}Detected Kernel:{Style.RESET} {kernel_version}")
+        elif banner:
+            print(f"\n{Style.INFO}Detected Banner:{Style.RESET}")
             print(f"  {banner[:100]}")
-        
-        print(f"\n{Style.INFO}Volatility 3 will attempt to download symbols automatically.{Style.RESET}")
-        print(f"{Style.INFO}If plugins fail, you may need to generate symbols manually:{Style.RESET}")
-        
-        print(f"\n{Style.BOLD}Option 1: Download pre-built symbols{Style.RESET}")
-        print(f"  - Check: https://isf-server.techanarchy.net/")
-        print(f"  - Place .json files in: volatility3/volatility3/symbols/linux/")
-        
-        print(f"\n{Style.BOLD}Option 2: Generate symbols with dwarf2json{Style.RESET}")
-        print(f"  # On a system with matching kernel + debug symbols:")
-        print(f"  sudo apt install linux-image-$(uname -r)-dbgsym")
-        print(f"  dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-$(uname -r) > symbols.json")
-        
-        print(f"\n{Style.BOLD}Option 3: Use --isf-url to specify ISF server{Style.RESET}")
-        print(f"  python linux_memory_analyzer.py -i image.lime --isf-url https://your-isf-server.com")
-        
+
+        print(f"\n{Style.INFO}Volatility needs kernel-specific symbol tables to analyze")
+        print(f"memory structures. All automatic download sources were tried.{Style.RESET}")
+
+        # Option 1: ISF web search
+        print(f"\n{Style.BOLD}Option 1: Search ISF server manually{Style.RESET}")
+        print(f"  Browse: https://isf-server.techanarchy.net/")
+        if kernel_version:
+            print(f"  Search for: {kernel_version}")
+        print(f"  Download the .json.xz file and place it in:")
+        print(f"  volatility3/volatility3/symbols/linux/")
+
+        # Option 2: Generate symbols
+        print(f"\n{Style.BOLD}Option 2: Generate symbols from a matching system{Style.RESET}")
+        if kernel_version:
+            print(f"  On a system running kernel {kernel_version}:")
+            print(f"    sudo apt install linux-image-{kernel_version}-dbgsym  # Ubuntu/Debian")
+            print(f"    dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-{kernel_version} > symbols.json")
+        else:
+            print(f"  On a system with the same kernel version:")
+            print(f"    sudo apt install linux-image-$(uname -r)-dbgsym")
+            print(f"    dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-$(uname -r) > symbols.json")
+
+        # Option 3: Re-run with symbols
+        print(f"\n{Style.BOLD}Option 3: Re-run with local symbol file{Style.RESET}")
+        print(f"  python linux_memory_analyzer.py -i <image> -s /path/to/symbols/")
+
         print(f"\n{Style.WARNING}{'='*60}{Style.RESET}")
-        print(f"{Style.INFO}Continuing with analysis (some plugins may fail)...{Style.RESET}")
     
-    def _generate_summary(self, verbose: bool = True):
-        """Generate analysis summary report."""
+    def _generate_summary(self, verbose: bool = True, symbols_available: bool = True):
+        """Generate analysis summary report with error categorization."""
         summary_path = os.path.join(self.output_dir, "analysis_summary.txt")
-        
+
         duration = (self.end_time - self.start_time).total_seconds()
         successful = len(self.vol_runner.results)
         failed = len(self.vol_runner.errors)
-        
+        kernel_version = self.vol_runner._extract_kernel_version()
+
+        # Categorize errors
+        symbol_errors = {}
+        plugin_errors = {}
+        for plugin, error in self.vol_runner.errors.items():
+            error_lower = error.lower()
+            if any(marker in error_lower for marker in [
+                'symbol_table_name', 'unsatisfied requirement',
+                'unable to validate', 'no suitable symbol table',
+            ]):
+                symbol_errors[plugin] = error
+            else:
+                plugin_errors[plugin] = error
+
         with open(summary_path, 'w') as f:
             f.write("=" * 60 + "\n")
             f.write("Linux Memory Analysis Summary\n")
             f.write("=" * 60 + "\n\n")
-            
+
             f.write(f"Image: {self.image_path}\n")
             f.write(f"Analysis Date: {self.start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Duration: {duration:.1f} seconds\n")
-            f.write(f"Output Directory: {self.output_dir}\n\n")
-            
+            f.write(f"Output Directory: {self.output_dir}\n")
+            if kernel_version:
+                f.write(f"Kernel Version: {kernel_version}\n")
+            f.write(f"Symbols Available: {'Yes' if symbols_available else 'No'}\n\n")
+
             f.write("-" * 40 + "\n")
             f.write("Plugin Results\n")
             f.write("-" * 40 + "\n\n")
-            
+
             f.write(f"Successful: {successful}\n")
-            f.write(f"Failed: {failed}\n\n")
-            
+            f.write(f"Failed: {failed}\n")
+            if symbol_errors:
+                f.write(f"  - Symbol-related: {len(symbol_errors)}\n")
+            if plugin_errors:
+                f.write(f"  - Plugin-specific: {len(plugin_errors)}\n")
+
+            if not symbols_available:
+                skipped = sum(len(p) for p in VOLATILITY_PLUGINS.values()) - \
+                          sum(len(p) for p in NO_SYMBOL_PLUGINS.values())
+                f.write(f"Skipped (no symbols): {skipped} plugins\n")
+            f.write("\n")
+
             if self.vol_runner.results:
                 f.write("Successful Plugins:\n")
                 for plugin, info in self.vol_runner.results.items():
-                    f.write(f"  - {plugin}: {info['line_count']} rows\n")
+                    f.write(f"  + {plugin}: {info['line_count']} rows\n")
                 f.write("\n")
-            
-            if self.vol_runner.errors:
-                f.write("Failed Plugins:\n")
-                for plugin, error in self.vol_runner.errors.items():
+
+            if symbol_errors:
+                f.write("Symbol-Related Failures (fix symbols to resolve all):\n")
+                for plugin in symbol_errors:
+                    f.write(f"  - {plugin}\n")
+                if kernel_version:
+                    f.write(f"\n  Root cause: No symbol table for kernel {kernel_version}\n")
+                    f.write(f"  Fix: Download or generate symbols for this kernel version\n")
+                f.write("\n")
+
+            if plugin_errors:
+                f.write("Plugin-Specific Failures:\n")
+                for plugin, error in plugin_errors.items():
                     f.write(f"  - {plugin}: {error[:100]}\n")
                 f.write("\n")
-            
+
             f.write("-" * 40 + "\n")
             f.write("Output Files\n")
             f.write("-" * 40 + "\n\n")
-            
+
             for filename in sorted(os.listdir(self.output_dir)):
                 if filename.endswith('.csv'):
                     filepath = os.path.join(self.output_dir, filename)
                     size = os.path.getsize(filepath)
                     f.write(f"  {filename} ({size:,} bytes)\n")
-        
+
         if verbose:
             print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
             print(f"{Style.HEADER}{Style.BOLD}  Analysis Complete{Style.RESET}")
             print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
             print(f"\n{Style.INFO}Duration:{Style.RESET} {duration:.1f} seconds")
+            if kernel_version:
+                print(f"{Style.INFO}Kernel:{Style.RESET} {kernel_version}")
             print(f"{Style.INFO}Successful:{Style.RESET} {successful} plugins")
-            if failed > 0:
-                print(f"{Style.WARNING}Failed:{Style.RESET} {failed} plugins")
+
+            if not symbols_available:
+                skipped = sum(len(p) for p in VOLATILITY_PLUGINS.values()) - \
+                          sum(len(p) for p in NO_SYMBOL_PLUGINS.values())
+                print(f"{Style.WARNING}Skipped:{Style.RESET} {skipped} plugins (no symbol tables)")
+
+            if symbol_errors:
+                print(f"{Style.ERROR}Symbol failures:{Style.RESET} {len(symbol_errors)} plugins (same root cause)")
+            if plugin_errors:
+                print(f"{Style.WARNING}Plugin failures:{Style.RESET} {len(plugin_errors)} plugins")
+                for plugin, error in plugin_errors.items():
+                    print(f"  {Style.DIM}- {plugin}: {error[:80]}{Style.RESET}")
+
             print(f"\n{Style.SUCCESS}Output Directory:{Style.RESET} {self.output_dir}")
             print(f"{Style.SUCCESS}Summary:{Style.RESET} {summary_path}")
 
@@ -926,14 +1081,14 @@ def quick_triage(image_path: str, vol_path: str = None, verbose: bool = True,
                  symbol_dirs: List[str] = None, isf_url: str = None) -> Dict:
     """
     Run quick triage analysis (essential plugins only).
-    
+
     Args:
         image_path: Path to memory image
         vol_path: Optional Volatility path
         verbose: Print progress
         symbol_dirs: Optional list of symbol directories
         isf_url: Optional ISF server URL
-    
+
     Returns:
         Dict of results
     """
@@ -946,25 +1101,41 @@ def quick_triage(image_path: str, vol_path: str = None, verbose: bool = True,
             ("linux.malware.malfind.Malfind", "malfind.csv", "Malicious memory"),
         ]
     }
-    
+
+    quick_no_symbol_plugins = {
+        "Quick Triage (no symbols)": [
+            ("banners.Banners", "banners.csv", "Kernel identification"),
+        ]
+    }
+
     image_name = os.path.splitext(os.path.basename(image_path))[0]
     output_dir = f"{image_name}_quick_triage"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     runner = VolatilityRunner(image_path, output_dir, vol_path,
                               symbol_dirs=symbol_dirs, isf_url=isf_url)
-    
+
     ok, msg = runner.check_volatility()
     if not ok:
         print(f"{Style.ERROR}Error: {msg}{Style.RESET}")
         return {}
-    
-    # First detect kernel banner
+
     if verbose:
         print(f"\n{Style.HEADER}{Style.BOLD}Quick Triage Analysis{Style.RESET}")
     runner.detect_kernel_banner(verbose)
-    
-    return runner.run_all_plugins(quick_plugins, verbose)
+
+    # Resolve symbols before running plugins
+    symbols_ok, _ = runner.resolve_symbols(verbose)
+
+    if symbols_ok:
+        return runner.run_all_plugins(quick_plugins, verbose)
+    else:
+        if verbose:
+            kernel_version = runner._extract_kernel_version()
+            print(f"\n{Style.WARNING}Symbols not available. Running banner-only triage.{Style.RESET}")
+            if kernel_version:
+                print(f"{Style.INFO}Kernel: {kernel_version}{Style.RESET}")
+        return runner.run_all_plugins(quick_no_symbol_plugins, verbose)
 
 
 # ============================================================================
