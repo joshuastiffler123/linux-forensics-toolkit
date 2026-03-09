@@ -40,6 +40,8 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 
+# Ensure sibling modules are importable (direct execution & editable installs)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lft_style import Style
 
 

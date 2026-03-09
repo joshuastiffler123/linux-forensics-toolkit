@@ -41,6 +41,8 @@ from typing import Dict, List, Optional, Tuple
 __version__ = "2.0.0"
 
 
+# Ensure sibling modules are importable (direct execution & editable installs)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lft_style import Style
 from lft_uac import UACHandler
 

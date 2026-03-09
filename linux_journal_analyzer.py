@@ -54,6 +54,8 @@ except ImportError:
 DEFAULT_MAX_MESSAGE_LENGTH = 50000  # 50KB - enough for base64 payloads
 
 
+# Ensure sibling modules are importable (direct execution & editable installs)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lft_style import Style
 from lft_uac import UACHandler
 

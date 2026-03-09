@@ -33,6 +33,8 @@ import sys
 import tarfile
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+# Ensure sibling modules are importable (direct execution & editable installs)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lft_uac import UACHandler
 
 __version__ = "2.0.0"

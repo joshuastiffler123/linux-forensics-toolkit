@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Optional, Tuple, Generator, Any, Union
+# Ensure sibling modules are importable (direct execution & editable installs)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lft_style import Style
 from lft_uac import UACHandler, is_safe_path, safe_extract_member
 import glob
