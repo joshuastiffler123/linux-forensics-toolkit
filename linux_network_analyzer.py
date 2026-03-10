@@ -54,13 +54,14 @@ _WELL_KNOWN_DNS = frozenset({
 })
 
 # RFC 1918 / link-local / loopback prefixes (not suspicious in resolv.conf)
-_PRIVATE_PREFIXES = ('10.', '172.', '192.168.', '127.', '::1', 'fe80::')
+_PRIVATE_PREFIXES = ('10.', '172.', '192.168.', '127.', '::1', 'fe80::', 'ff00::', 'ff02::', 'fe00::', '0.0.0.0')
 
 # Standard /etc/hosts entries that are expected
 _STANDARD_HOSTS_ENTRIES = frozenset({
     '127.0.0.1', '127.0.1.1', '::1',
     'ff02::1', 'ff02::2', 'ff02::3',
     'fe00::0', 'fe00::1', 'fe00::2',
+    'ff00::0',                          # ip6-mcastprefix (standard)
 })
 
 # Web-shell filenames (exact basename matches, case-insensitive)
