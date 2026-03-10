@@ -393,6 +393,7 @@ OPTIONAL_PLUGINS = {
 NO_SYMBOL_PLUGINS = {
     "Kernel Identification (no symbols required)": [
         ("banners.Banners", "banners.csv", "Identifies kernel version from memory"),
+        ("linux.vmcoreinfo.VMCoreInfo", "vmcoreinfo.csv", "VM core information from kernel"),
     ],
 }
 
