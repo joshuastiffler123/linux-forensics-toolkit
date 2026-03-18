@@ -31,6 +31,7 @@ import argparse
 import csv
 import gzip
 import io
+import logging
 import os
 import re
 import struct
@@ -41,8 +42,9 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple, Set
 
+from lft.core.uac import UnmatchedWriter
 
-from lft_style import Style
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -198,19 +200,21 @@ class TimelineEntry:
 # ============================================================================
 
 def bodyfile_to_timeline(entries: List[BodyfileEntry],
-                         min_date: str = "2001-01-01") -> List[TimelineEntry]:
+                         min_date: str = "") -> List[TimelineEntry]:
     """
     Convert bodyfile entries to a sorted mactime CSV timeline.
 
     Each bodyfile entry can produce up to 4 timeline events (M, A, C, B).
-    Events before min_date are excluded.
+    Events before *min_date* are excluded.  Default is empty string
+    (no filtering) so analysts see everything.
     """
     min_epoch = 0
-    try:
-        min_epoch = int(datetime.strptime(min_date, "%Y-%m-%d").replace(
-            tzinfo=timezone.utc).timestamp())
-    except ValueError:
-        pass
+    if min_date:
+        try:
+            min_epoch = int(datetime.strptime(min_date, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            pass
 
     events: List[Tuple[int, str, BodyfileEntry]] = []
 
@@ -283,6 +287,7 @@ class FilesystemTimelineGenerator:
         self.bodyfile_entries: List[BodyfileEntry] = []
         self.login_entries: List[BodyfileEntry] = []
         self.hostname = "unknown"
+        self.unmatched = UnmatchedWriter()
 
         if self.is_tarball:
             self._open_tarball()
@@ -407,21 +412,23 @@ class FilesystemTimelineGenerator:
             return False
 
         if verbose:
-            print(f"  {Style.INFO}[+] Loading UAC bodyfile.txt{Style.RESET}",
-                  file=sys.stderr)
+            logger.info("[+] Loading UAC bodyfile.txt")
 
         count = 0
-        for line in data.decode('utf-8', errors='replace').splitlines():
+        for line_number, line in enumerate(
+                data.decode('utf-8', errors='replace').splitlines(), 1):
             line = line.strip()
-            if line and not line.startswith('#'):
-                entry = BodyfileEntry.from_bodyfile_line(line)
-                if entry:
-                    self.bodyfile_entries.append(entry)
-                    count += 1
+            if not line or line.startswith('#'):
+                continue
+            entry = BodyfileEntry.from_bodyfile_line(line)
+            if entry:
+                self.bodyfile_entries.append(entry)
+                count += 1
+            else:
+                self.unmatched.add("bodyfile.txt", line_number, line)
 
         if verbose:
-            print(f"  {Style.SUCCESS}    Loaded {count} entries from "
-                  f"bodyfile.txt{Style.RESET}", file=sys.stderr)
+            logger.log(25, "    Loaded %d entries from bodyfile.txt", count)
         return count > 0
 
     # ------------------------------------------------------------------
@@ -434,8 +441,7 @@ class FilesystemTimelineGenerator:
             return 0
 
         if verbose:
-            print(f"  {Style.INFO}[+] Generating bodyfile from tarball "
-                  f"metadata{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Generating bodyfile from tarball metadata")
 
         count = 0
         prefix_len = len(self.root_prefix) if self.root_prefix else 0
@@ -465,8 +471,7 @@ class FilesystemTimelineGenerator:
             count += 1
 
         if verbose:
-            print(f"  {Style.SUCCESS}    Generated {count} entries from "
-                  f"tarball{Style.RESET}", file=sys.stderr)
+            logger.log(25, "    Generated %d entries from tarball", count)
         return count
 
     # ------------------------------------------------------------------
@@ -478,8 +483,7 @@ class FilesystemTimelineGenerator:
         root = self._find_root_dir()
 
         if verbose:
-            print(f"  {Style.INFO}[+] Generating bodyfile from directory: "
-                  f"{root}{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Generating bodyfile from directory: %s", root)
 
         count = 0
         root_len = len(root)
@@ -515,8 +519,7 @@ class FilesystemTimelineGenerator:
                     count += 1
 
         if verbose:
-            print(f"  {Style.SUCCESS}    Generated {count} entries from "
-                  f"directory{Style.RESET}", file=sys.stderr)
+            logger.log(25, "    Generated %d entries from directory", count)
         return count
 
     # ------------------------------------------------------------------
@@ -630,8 +633,7 @@ class FilesystemTimelineGenerator:
                             pass
 
         if verbose and count:
-            print(f"  {Style.INFO}[+] Extracted {count} login events from "
-                  f"wtmp{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d login events from wtmp", count)
         return count
 
     # ------------------------------------------------------------------
@@ -681,7 +683,14 @@ class FilesystemTimelineGenerator:
 
         for path, data in audit_files:
             text = data.decode('utf-8', errors='replace')
-            for m in self._AUDIT_LOGIN_RE.finditer(text):
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                m = self._AUDIT_LOGIN_RE.search(line)
+                if not m:
+                    self.unmatched.add(path, line_number, line)
+                    continue
+
                 action_type = m.group(1)
                 epoch = int(m.group(2))
                 pid = m.group(3)
@@ -707,8 +716,7 @@ class FilesystemTimelineGenerator:
                 count += 1
 
         if verbose and count:
-            print(f"  {Style.INFO}[+] Extracted {count} login events from "
-                  f"audit logs{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d login events from audit logs", count)
         return count
 
     # ------------------------------------------------------------------
@@ -769,7 +777,9 @@ class FilesystemTimelineGenerator:
 
         for data in log_files:
             text = data.decode('utf-8', errors='replace')
-            for line in text.splitlines():
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
                 if not self.SECURITY_COMMANDS.search(line):
                     continue
                 # Try new-style timestamp
@@ -800,10 +810,11 @@ class FilesystemTimelineGenerator:
                         ctime=epoch, crtime=epoch
                     ))
                     count += 1
+                else:
+                    self.unmatched.add("syslog", line_number, line)
 
         if verbose and count:
-            print(f"  {Style.INFO}[+] Extracted {count} security events from "
-                  f"syslog{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d security events from syslog", count)
         return count
 
     # ------------------------------------------------------------------
@@ -821,12 +832,9 @@ class FilesystemTimelineGenerator:
         self.hostname = self._get_hostname()
 
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}Filesystem Timeline Generator"
-                  f"{Style.RESET}", file=sys.stderr)
-            print(f"  {Style.INFO}Source:{Style.RESET} {self.source_path}",
-                  file=sys.stderr)
-            print(f"  {Style.INFO}Hostname:{Style.RESET} {self.hostname}",
-                  file=sys.stderr)
+            logger.info("Filesystem Timeline Generator")
+            logger.info("Source: %s", self.source_path)
+            logger.info("Hostname: %s", self.hostname)
 
         # 1. Try loading UAC bodyfile first
         has_bodyfile = self._load_uac_bodyfile(verbose)
@@ -844,9 +852,8 @@ class FilesystemTimelineGenerator:
         self._collect_syslog_bodyfile(verbose)
 
         if verbose:
-            print(f"\n  {Style.SUCCESS}Total: {len(self.bodyfile_entries)} "
-                  f"filesystem entries, {len(self.login_entries)} login "
-                  f"entries{Style.RESET}", file=sys.stderr)
+            logger.log(25, "Total: %d filesystem entries, %d login entries",
+                        len(self.bodyfile_entries), len(self.login_entries))
 
         return self.bodyfile_entries, self.login_entries
 
@@ -863,7 +870,7 @@ class FilesystemTimelineGenerator:
                 f.write(entry.to_bodyfile_line() + '\n')
 
     def export_timeline_csv(self, output_path: str,
-                            min_date: str = "2001-01-01"):
+                            min_date: str = ""):
         """Export a mactime-style CSV timeline."""
         all_entries = self.bodyfile_entries + self.login_entries
         timeline = bodyfile_to_timeline(all_entries, min_date)
@@ -882,11 +889,10 @@ class FilesystemTimelineGenerator:
         if not self.login_entries:
             return
 
-        min_epoch = 978307200  # 2001-01-01 UTC
         rows: List[Tuple[int, str]] = []
         for entry in self.login_entries:
             epoch = entry.mtime or entry.atime or entry.ctime or entry.crtime
-            if epoch and epoch > min_epoch:
+            if epoch and epoch > 0:
                 rows.append((epoch, entry.name))
         rows.sort(key=lambda r: r[0])
 
@@ -907,7 +913,8 @@ class FilesystemTimelineGenerator:
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    from lft.core.logging import setup_logging
+    setup_logging()
 
     parser = argparse.ArgumentParser(
         description="Linux Filesystem Timeline Generator",
@@ -940,8 +947,7 @@ Output Files:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"{Style.ERROR}Error: Source not found: {source}{Style.RESET}",
-              file=sys.stderr)
+        logger.error("Error: Source not found: %s", source)
         sys.exit(1)
 
     output_dir = os.path.abspath(args.output)
@@ -967,13 +973,22 @@ Output Files:
                 output_dir, f"{hostname}_login_timeline_merged.csv")
             gen.export_login_csv(login_path)
 
+        # Export unmatched lines
+        if gen.unmatched.count:
+            unmatched_path = os.path.join(
+                output_dir, f"{hostname}_filesystem_timeline_unmatched.csv")
+            gen.unmatched.export_csv(unmatched_path)
+            logger.warning("Unmatched lines exported to: %s (%d lines)",
+                           unmatched_path, gen.unmatched.count)
+
         if not args.quiet:
-            print(f"\n{Style.SUCCESS}Output:{Style.RESET}", file=sys.stderr)
-            print(f"  {bf_path}", file=sys.stderr)
-            print(f"  {tl_path}", file=sys.stderr)
+            logger.log(25, "Output:")
+            logger.log(25, "  %s", bf_path)
+            logger.log(25, "  %s", tl_path)
             if gen.login_entries:
-                print(f"  {os.path.join(output_dir, f'{hostname}_login_timeline_merged.csv')}",
-                      file=sys.stderr)
+                logger.log(25, "  %s",
+                            os.path.join(output_dir,
+                                         "%s_login_timeline_merged.csv" % hostname))
     finally:
         gen.close()
 

@@ -45,9 +45,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Optional, Tuple, Generator, Any, Union
-from lft_style import Style
-from lft_uac import UACHandler, is_safe_path, safe_extract_member
+import logging
+from lft.core.uac import UACHandler, UnmatchedWriter, is_safe_path, safe_extract_member
 import glob
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_path(path: str) -> str:
@@ -155,7 +157,8 @@ class TimelineEvent:
         terminal: str = "",
         pid: int = 0,
         description: str = "",
-        raw_data: str = ""
+        raw_data: str = "",
+        username_category: str = ""
     ):
         self.timestamp = timestamp
         self.event_type = event_type
@@ -166,6 +169,7 @@ class TimelineEvent:
         self.pid = pid
         self.description = description
         self.raw_data = raw_data
+        self.username_category = username_category
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert event to dictionary for CSV output."""
@@ -190,12 +194,13 @@ class TimelineEvent:
             "Timestamp_Local": timestamp_local,
             "event_type": self.event_type,
             "username": self.username,
+            "username_category": self.username_category,
             "source_ip": self.source_ip,
             "terminal": self.terminal,
             "pid": str(self.pid) if self.pid else "",
             "description": self.description,
             "source_file": self.source_file,
-            "raw_data": self.raw_data[:500] if self.raw_data else ""  # Truncate raw data
+            "raw_data": self.raw_data[:500] + " [TRUNCATED]" if self.raw_data and len(self.raw_data) > 500 else (self.raw_data or "")
         }
 
 
@@ -391,8 +396,9 @@ def extract_ip_from_message(message: str) -> str:
     
     return ""
 
-# Words that look like usernames but are actually log message fragments
-INVALID_USERNAME_WORDS = frozenset([
+# Words that look like usernames but are actually log message fragments.
+# Used for classification (not filtering) — events are never dropped.
+SYSTEM_NOISE_WORDS = frozenset([
     # Common log message words that get incorrectly captured
     'runtime', 'manager', 'message', 'slice', 'target', 'methods',
     'session', 'service', 'system', 'scope', 'socket', 'mount', 'path',
@@ -525,7 +531,7 @@ def is_valid_username(username: str) -> bool:
 
     # Reject known non-username words (case-insensitive)
     lower = username.lower()
-    if lower in INVALID_USERNAME_WORDS:
+    if lower in SYSTEM_NOISE_WORDS:
         return False
 
     # Reject if too long (Linux max is 32)
@@ -579,27 +585,57 @@ def is_valid_username(username: str) -> bool:
     return True
 
 
+def classify_username(username: str) -> tuple:
+    """
+    Clean and classify a username extracted from logs.
+
+    Never drops data — always returns the cleaned string with a category
+    so analysts can filter on their own terms.
+
+    Args:
+        username: Raw extracted username
+
+    Returns:
+        (cleaned_username, category) where category is one of:
+        - "user"         — passes all validation checks
+        - "system_noise" — matched SYSTEM_NOISE_WORDS (log fragments, not real accounts)
+        - "invalid"      — failed structural checks (path, hex, too long, etc.)
+        - ""             — input was empty/None
+    """
+    if not username:
+        return ("", "")
+
+    # Strip common trailing punctuation
+    cleaned = username.rstrip(',:;)>]}"\'')
+    if not cleaned:
+        return ("", "")
+
+    if is_valid_username(cleaned):
+        return (cleaned, "user")
+
+    # Determine why it failed — was it the noise-words list or structural?
+    lower = cleaned.lower()
+    if lower in SYSTEM_NOISE_WORDS:
+        return (cleaned, "system_noise")
+
+    return (cleaned, "invalid")
+
+
 def sanitize_username(username: str) -> str:
     """
     Clean and validate a username extracted from logs.
-    
+
+    Kept for backward compatibility. Prefer classify_username() for
+    new code that needs the category.
+
     Args:
         username: Raw extracted username
-        
+
     Returns:
         Cleaned username if valid, empty string otherwise
     """
-    if not username:
-        return ""
-    
-    # Strip common trailing punctuation
-    cleaned = username.rstrip(',:;)>]}"\'')
-    
-    # Validate
-    if is_valid_username(cleaned):
-        return cleaned
-    
-    return ""
+    name, category = classify_username(username)
+    return name if category == "user" else ""
 
 
 def ip_from_int(addr: int) -> str:
@@ -749,8 +785,8 @@ def parse_utmp_file(filepath: str, log_type: str = "utmp", data: bytes = None) -
                 events.append(event)
                 
     except Exception as e:
-        print(f"[!] Error parsing {filepath}: {e}", file=sys.stderr)
-    
+        logger.error("Error parsing %s: %s", filepath, e)
+
     return events
 
 
@@ -830,8 +866,8 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                 uid += 1
                 
     except Exception as e:
-        print(f"[!] Error parsing {filepath}: {e}", file=sys.stderr)
-    
+        logger.error("Error parsing %s: %s", filepath, e)
+
     return events
 
 
@@ -1307,7 +1343,7 @@ def parse_audit_timestamp(line: str) -> Optional[datetime]:
     return None
 
 
-def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime = None) -> List[TimelineEvent]:
+def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime = None, unmatched: "UnmatchedWriter" = None) -> List[TimelineEvent]:
     """
     Parse auth.log or secure log file.
     
@@ -1420,16 +1456,16 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
     
     try:
         with open_file(filepath, binary=False, data=data) as f:
-            for line in f:
+            for line_number, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 # Parse timestamp
                 timestamp = None
                 hostname = ""
                 message = line
-                
+
                 # Try syslog format
                 match = SYSLOG_TIMESTAMP_PATTERN.match(line)
                 if match:
@@ -1443,10 +1479,10 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
                         timestamp = parse_iso_timestamp(match.group(1))
                         hostname = match.group(2)
                         message = match.group(3)
-                
+
                 if not timestamp:
                     continue
-                
+
                 # Match against auth patterns
                 matched = False
                 for pattern_name, pattern in AUTH_PATTERNS.items():
@@ -1611,13 +1647,14 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
                             description = f"Pkexec by '{username}' as '{target_user}'"
                         
                         # Validate and sanitize the extracted username
-                        validated_username = sanitize_username(username) if username else ""
-                        
+                        classified_name, name_category = classify_username(username) if username else ("", "")
+
                         event = TimelineEvent(
                             timestamp=timestamp,
                             event_type=event_type,
                             source_file=filepath,
-                            username=validated_username,
+                            username=classified_name,
+                            username_category=name_category,
                             source_ip=source_ip,
                             pid=pid,
                             description=description,
@@ -1647,35 +1684,40 @@ def parse_auth_log(filepath: str, data: bytes = None, reference_date: datetime =
                             r'session opened for ([a-zA-Z_][a-zA-Z0-9_-]*)',  # session opened for name
                             r'session closed for ([a-zA-Z_][a-zA-Z0-9_-]*)',  # session closed for name
                         ]
+                        username_category = ""
                         for pattern in user_patterns:
                             user_match = re.search(pattern, message, re.IGNORECASE)
                             if user_match:
                                 potential_user = user_match.group(1)
-                                if is_valid_username(potential_user):
-                                    username = sanitize_username(potential_user)
+                                username, username_category = classify_username(potential_user)
+                                if username:
                                     break
-                        
+
                         # Extract IP if possible - use validated extraction
                         source_ip = extract_ip_from_message(message)
-                        
+
                         event = TimelineEvent(
                             timestamp=timestamp,
                             event_type="AUTH_EVENT",
                             source_file=filepath,
                             username=username,
+                            username_category=username_category,
                             source_ip=source_ip,
                             description=message[:200],
                             raw_data=line
                         )
                         events.append(event)
-                        
+                    else:
+                        if unmatched is not None:
+                            unmatched.add(filepath, line_number, line)
+
     except Exception as e:
-        print(f"[!] Error parsing {filepath}: {e}", file=sys.stderr)
-    
+        logger.error("Error parsing %s: %s", filepath, e)
+
     return events
 
 
-def parse_audit_log(filepath: str, data: bytes = None) -> List[TimelineEvent]:
+def parse_audit_log(filepath: str, data: bytes = None, unmatched: "UnmatchedWriter" = None) -> List[TimelineEvent]:
     """
     Parse audit.log file.
     
@@ -1729,16 +1771,16 @@ def parse_audit_log(filepath: str, data: bytes = None) -> List[TimelineEvent]:
     
     try:
         with open_file(filepath, binary=False, data=data) as f:
-            for line in f:
+            for line_number, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 # Parse timestamp
                 timestamp = parse_audit_timestamp(line)
                 if not timestamp:
                     continue
-                
+
                 # Match against audit patterns
                 matched = False
                 for pattern_name, pattern in AUDIT_PATTERNS.items():
@@ -1911,13 +1953,13 @@ def parse_audit_log(filepath: str, data: bytes = None) -> List[TimelineEvent]:
                         username = acct_match.group(1) if acct_match else ""
                         result = res_match.group(1) if res_match else ""
                         source_ip = addr_match.group(1) if addr_match else ""
-                        
+
                         description = f"Audit {audit_type}"
                         if username:
                             description += f" for '{username}'"
                         if result:
                             description += f" - {result}"
-                        
+
                         event = TimelineEvent(
                             timestamp=timestamp,
                             event_type=f"AUDIT_{audit_type}",
@@ -1928,14 +1970,17 @@ def parse_audit_log(filepath: str, data: bytes = None) -> List[TimelineEvent]:
                             raw_data=line
                         )
                         events.append(event)
-                        
+                    else:
+                        if unmatched is not None:
+                            unmatched.add(filepath, line_number, line)
+
     except Exception as e:
-        print(f"[!] Error parsing {filepath}: {e}", file=sys.stderr)
-    
+        logger.error("Error parsing %s: %s", filepath, e)
+
     return events
 
 
-def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: datetime = None) -> List[TimelineEvent]:
+def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: datetime = None, unmatched: "UnmatchedWriter" = None) -> List[TimelineEvent]:
     """
     Parse syslog/messages file for login-related events.
     
@@ -1997,16 +2042,16 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
     
     try:
         with open_file(filepath, binary=False, data=data) as f:
-            for line in f:
+            for line_number, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                
+
                 # Parse timestamp
                 timestamp = None
                 hostname = ""
                 message = line
-                
+
                 match = SYSLOG_TIMESTAMP_PATTERN.match(line)
                 if match:
                     timestamp = parse_syslog_timestamp(match.group(1), reference_date)
@@ -2018,10 +2063,10 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
                         timestamp = parse_iso_timestamp(match.group(1))
                         hostname = match.group(2)
                         message = match.group(3)
-                
+
                 if not timestamp:
                     continue
-                
+
                 # Check if line contains any login-related keywords
                 message_lower = message.lower()
                 if not any(kw in message_lower for kw in LOGIN_KEYWORDS):
@@ -2121,14 +2166,15 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
                         else:
                             event_type = "SYSLOG_EVENT"
                         
-                        # Validate the extracted username before creating event
-                        validated_username = sanitize_username(username) if username else ""
-                        
+                        # Classify the extracted username (never drops — adds category)
+                        classified_name, name_category = classify_username(username) if username else ("", "")
+
                         event = TimelineEvent(
                             timestamp=timestamp,
                             event_type=event_type,
                             source_file=filepath,
-                            username=validated_username,
+                            username=classified_name,
+                            username_category=name_category,
                             source_ip=source_ip,
                             description=description,
                             raw_data=line
@@ -2145,6 +2191,7 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
                     
                     # Extract username if possible - use precise patterns
                     username = ""
+                    username_category = ""
                     user_patterns = [
                         r'(?:^|\s)user[=:][\s"]*([a-zA-Z_][a-zA-Z0-9_-]*)',
                         r'for user [\'""]?([a-zA-Z_][a-zA-Z0-9_-]*)[\'""]?',
@@ -2154,27 +2201,30 @@ def parse_syslog_messages(filepath: str, data: bytes = None, reference_date: dat
                         user_match = re.search(pattern, message, re.IGNORECASE)
                         if user_match:
                             potential_user = user_match.group(1)
-                            if is_valid_username(potential_user):
-                                username = sanitize_username(potential_user)
+                            username, username_category = classify_username(potential_user)
+                            if username:
                                 break
-                    
+
                     # Extract IP if possible - use validated extraction
                     source_ip = extract_ip_from_message(message)
-                    
+
                     event = TimelineEvent(
                         timestamp=timestamp,
                         event_type="SYSLOG_EVENT",
                         source_file=filepath,
                         username=username,
+                        username_category=username_category,
                         source_ip=source_ip,
                         description=message[:200],
                         raw_data=line
                     )
                     events.append(event)
-                        
+                    if unmatched is not None:
+                        unmatched.add(filepath, line_number, line)
+
     except Exception as e:
-        print(f"[!] Error parsing {filepath}: {e}", file=sys.stderr)
-    
+        logger.error("Error parsing %s: %s", filepath, e)
+
     return events
 
 
@@ -2285,7 +2335,7 @@ def parse_bash_history(filepath: str, data: bytes = None, username: str = "",
             events.append(event)
             
     except Exception as e:
-        print(f"[!] Error parsing bash_history {filepath}: {e}", file=sys.stderr)
+        logger.error("Error parsing bash_history %s: %s", filepath, e)
     
     return events
 
@@ -2429,6 +2479,7 @@ class LinuxLoginTimeline:
         
         self.tarball_handler = None
         self.passwd_data = None
+        self.unmatched = UnmatchedWriter()
     
     def get_log_path(self, relative_path: str) -> str:
         """Get full path to a log file (directory mode only)."""
@@ -2447,8 +2498,6 @@ class LinuxLoginTimeline:
         Args:
             verbose: Whether to print progress information
         """
-        Style.enable_windows_ansi()
-        
         with UACHandler(self.source_path, verbose=verbose) as handler:
             self.tarball_handler = handler
             self.hostname = handler.hostname
@@ -2462,7 +2511,7 @@ class LinuxLoginTimeline:
                 self.passwd_data = handler.extract_file(passwd_path)
                 if self.passwd_data:
                     if verbose:
-                        print(f"{Style.INFO}Found passwd file for username resolution{Style.RESET}", file=sys.stderr)
+                        logger.info("Found passwd file for username resolution")
                     break
             
             # Define log sources with their parser functions
@@ -2481,7 +2530,7 @@ class LinuxLoginTimeline:
             
             for base_pattern, log_type_factory, description, is_binary in log_sources:
                 if verbose:
-                    print(f"\n{Style.INFO}Processing {description}...{Style.RESET}", file=sys.stderr)
+                    logger.info("Processing %s...", description)
                 
                 # Find matching files
                 if base_pattern == "audit.log":
@@ -2491,98 +2540,98 @@ class LinuxLoginTimeline:
                 
                 if not files:
                     if verbose:
-                        print(f"  {Style.DIM}No files found{Style.RESET}", file=sys.stderr)
+                        logger.debug("No files found")
                     continue
-                
+
                 for filepath in files:
                     if verbose:
-                        print(f"  {Style.SUCCESS}[+] Parsing:{Style.RESET} {os.path.basename(filepath)}", file=sys.stderr)
-                    
+                        logger.log(25, "[+] Parsing: %s", os.path.basename(filepath))
+
                     try:
                         # Extract file data
                         data = handler.extract_file(filepath)
                         if data is None:
                             continue
-                        
+
                         # Parse based on log type
                         log_type = log_type_factory()
-                        
+
                         if log_type in ("btmp", "utmp", "wtmp"):
                             file_events = parse_utmp_file(filepath, log_type, data=data)
                         elif log_type == "lastlog":
                             file_events = parse_lastlog(filepath, data=data, passwd_data=self.passwd_data)
                         elif log_type == "auth":
-                            file_events = parse_auth_log(filepath, data=data)
+                            file_events = parse_auth_log(filepath, data=data, unmatched=self.unmatched)
                         elif log_type == "audit":
-                            file_events = parse_audit_log(filepath, data=data)
+                            file_events = parse_audit_log(filepath, data=data, unmatched=self.unmatched)
                         elif log_type == "syslog":
-                            file_events = parse_syslog_messages(filepath, data=data)
+                            file_events = parse_syslog_messages(filepath, data=data, unmatched=self.unmatched)
                         else:
                             continue
-                        
+
                         self.events.extend(file_events)
                         self.stats[description] += len(file_events)
-                        
+
                         if verbose:
-                            print(f"      Found {Style.GREEN}{len(file_events)}{Style.RESET} events", file=sys.stderr)
-                            
+                            logger.info("    Found %d events", len(file_events))
+
                     except Exception as e:
-                        print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
+                        logger.error("[!] Error: %s", e)
             
             # Process bash history files
             if verbose:
-                print(f"\n{Style.INFO}Processing bash_history files...{Style.RESET}", file=sys.stderr)
-            
+                logger.info("Processing bash_history files...")
+
             history_files = find_history_files_in_tarball(handler)
-            
+
             if not history_files:
                 if verbose:
-                    print(f"  {Style.DIM}No history files found{Style.RESET}", file=sys.stderr)
+                    logger.debug("No history files found")
             else:
                 for filepath, username, mtime in history_files:
                     if verbose:
-                        user_info = f" ({username})" if username else ""
-                        print(f"  {Style.SUCCESS}[+] Parsing:{Style.RESET} {os.path.basename(filepath)}{user_info}", file=sys.stderr)
-                    
+                        user_info = " (%s)" % username if username else ""
+                        logger.log(25, "[+] Parsing: %s%s", os.path.basename(filepath), user_info)
+
                     try:
                         data = handler.extract_file(filepath)
                         if data is None:
                             continue
-                        
+
                         file_events = parse_bash_history(
-                            filepath, 
-                            data=data, 
+                            filepath,
+                            data=data,
                             username=username,
                             file_mtime=mtime
                         )
-                        
+
                         # Only count events with timestamps as "bash_history"
                         dated_events = [e for e in file_events if e.event_type == "BASH_HISTORY"]
                         undated_events = [e for e in file_events if e.event_type == "BASH_HISTORY_UNDATED"]
-                        
+
                         self.events.extend(file_events)
                         self.stats["bash_history (dated)"] += len(dated_events)
                         self.stats["bash_history (undated)"] += len(undated_events)
-                        
+
                         if verbose:
                             if dated_events:
-                                print(f"      Found {Style.GREEN}{len(dated_events)}{Style.RESET} dated commands", file=sys.stderr)
+                                logger.info("    Found %d dated commands", len(dated_events))
                             if undated_events:
-                                print(f"      Found {Style.YELLOW}{len(undated_events)}{Style.RESET} undated commands", file=sys.stderr)
-                                
+                                logger.info("    Found %d undated commands", len(undated_events))
+
                     except Exception as e:
-                        print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
+                        logger.error("[!] Error: %s", e)
         
         # Sort events by timestamp
         self.events.sort(key=lambda e: (e.timestamp.replace(tzinfo=None) if e.timestamp.tzinfo else e.timestamp) if e.timestamp else datetime.min)
         
         if verbose:
-            print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.SUCCESS}Total events collected: {len(self.events)}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Events by source:{Style.RESET}", file=sys.stderr)
+            logger.info("=" * 50)
+            logger.log(25, "Total events collected: %d", len(self.events))
+            logger.info("Events by source:")
             for source, count in sorted(self.stats.items()):
-                print(f"  {source}: {count}", file=sys.stderr)
-    
+                logger.info("  %s: %d", source, count)
+
     def _collect_from_directory(self, verbose: bool = True) -> None:
         """
         Collect events from a directory (extracted UAC or live system).
@@ -2590,8 +2639,6 @@ class LinuxLoginTimeline:
         Args:
             verbose: Whether to print progress information
         """
-        Style.enable_windows_ansi()
-        
         var_log = self.get_log_path("var/log")
         
         # Also check if this is an extracted UAC with nested structure
@@ -2603,7 +2650,7 @@ class LinuxLoginTimeline:
                     if os.path.exists(potential_var_log):
                         var_log = potential_var_log
                         if verbose:
-                            print(f"{Style.INFO}Found var/log at:{Style.RESET} {var_log}", file=sys.stderr)
+                            logger.info("Found var/log at: %s", var_log)
                         break
         
         # Try to get passwd for username resolution
@@ -2613,7 +2660,7 @@ class LinuxLoginTimeline:
                 with open(passwd_path, 'rb') as f:
                     self.passwd_data = f.read()
                 if verbose:
-                    print(f"{Style.INFO}Found passwd file for username resolution{Style.RESET}", file=sys.stderr)
+                    logger.info("Found passwd file for username resolution")
             except Exception:
                 pass
         
@@ -2626,16 +2673,16 @@ class LinuxLoginTimeline:
             ("lastlog", lambda f, d=None: parse_lastlog(f, data=d, passwd_data=self.passwd_data), "lastlog"),
             
             # Text logs
-            ("auth.log", lambda f, d=None: parse_auth_log(f, data=d), "auth.log"),
-            ("secure", lambda f, d=None: parse_auth_log(f, data=d), "secure"),
-            ("audit/audit.log", lambda f, d=None: parse_audit_log(f, data=d), "audit.log"),
-            ("messages", lambda f, d=None: parse_syslog_messages(f, data=d), "messages"),
-            ("syslog", lambda f, d=None: parse_syslog_messages(f, data=d), "syslog"),
+            ("auth.log", lambda f, d=None: parse_auth_log(f, data=d, unmatched=self.unmatched), "auth.log"),
+            ("secure", lambda f, d=None: parse_auth_log(f, data=d, unmatched=self.unmatched), "secure"),
+            ("audit/audit.log", lambda f, d=None: parse_audit_log(f, data=d, unmatched=self.unmatched), "audit.log"),
+            ("messages", lambda f, d=None: parse_syslog_messages(f, data=d, unmatched=self.unmatched), "messages"),
+            ("syslog", lambda f, d=None: parse_syslog_messages(f, data=d, unmatched=self.unmatched), "syslog"),
         ]
         
         for base_pattern, parser, description in log_sources:
             if verbose:
-                print(f"\n{Style.INFO}Processing {description}...{Style.RESET}", file=sys.stderr)
+                logger.info("Processing %s...", description)
             
             # Find matching files
             if "/" in base_pattern:
@@ -2654,75 +2701,75 @@ class LinuxLoginTimeline:
             
             if not files:
                 if verbose:
-                    print(f"  {Style.DIM}No files found{Style.RESET}", file=sys.stderr)
+                    logger.debug("No files found")
                 continue
-            
+
             for filepath in files:
                 if not os.path.exists(filepath):
                     continue
-                    
+
                 if verbose:
-                    print(f"  {Style.SUCCESS}[+] Parsing:{Style.RESET} {filepath}", file=sys.stderr)
-                
+                    logger.log(25, "[+] Parsing: %s", filepath)
+
                 try:
                     file_events = parser(filepath)
                     self.events.extend(file_events)
                     self.stats[description] += len(file_events)
-                    
+
                     if verbose:
-                        print(f"      Found {Style.GREEN}{len(file_events)}{Style.RESET} events", file=sys.stderr)
+                        logger.info("    Found %d events", len(file_events))
                 except Exception as e:
-                    print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
+                    logger.error("[!] Error: %s", e)
         
         # Process bash history files (from /root/ and /home/*)
         if verbose:
-            print(f"\n{Style.INFO}Processing bash_history files...{Style.RESET}", file=sys.stderr)
-        
+            logger.info("Processing bash_history files...")
+
         history_files = find_history_files_in_directory(self.source_path)
-        
+
         if not history_files:
             if verbose:
-                print(f"  {Style.DIM}No history files found{Style.RESET}", file=sys.stderr)
+                logger.debug("No history files found")
         else:
             for filepath, username, mtime in history_files:
                 if verbose:
-                    user_info = f" ({username})" if username else ""
-                    print(f"  {Style.SUCCESS}[+] Parsing:{Style.RESET} {os.path.basename(filepath)}{user_info}", file=sys.stderr)
-                
+                    user_info = " (%s)" % username if username else ""
+                    logger.log(25, "[+] Parsing: %s%s", os.path.basename(filepath), user_info)
+
                 try:
                     file_events = parse_bash_history(
-                        filepath, 
+                        filepath,
                         username=username,
                         file_mtime=mtime
                     )
-                    
+
                     # Only count events with timestamps as "bash_history"
                     dated_events = [e for e in file_events if e.event_type == "BASH_HISTORY"]
                     undated_events = [e for e in file_events if e.event_type == "BASH_HISTORY_UNDATED"]
-                    
+
                     self.events.extend(file_events)
                     self.stats["bash_history (dated)"] += len(dated_events)
                     self.stats["bash_history (undated)"] += len(undated_events)
-                    
+
                     if verbose:
                         if dated_events:
-                            print(f"      Found {Style.GREEN}{len(dated_events)}{Style.RESET} dated commands", file=sys.stderr)
+                            logger.info("    Found %d dated commands", len(dated_events))
                         if undated_events:
-                            print(f"      Found {Style.YELLOW}{len(undated_events)}{Style.RESET} undated commands", file=sys.stderr)
-                            
+                            logger.info("    Found %d undated commands", len(undated_events))
+
                 except Exception as e:
-                    print(f"  {Style.ERROR}[!] Error:{Style.RESET} {e}", file=sys.stderr)
+                    logger.error("[!] Error: %s", e)
         
         # Sort events by timestamp
         self.events.sort(key=lambda e: (e.timestamp.replace(tzinfo=None) if e.timestamp.tzinfo else e.timestamp) if e.timestamp else datetime.min)
         
         if verbose:
-            print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.SUCCESS}Total events collected: {len(self.events)}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Events by source:{Style.RESET}", file=sys.stderr)
+            logger.info("=" * 50)
+            logger.log(25, "Total events collected: %d", len(self.events))
+            logger.info("Events by source:")
             for source, count in sorted(self.stats.items()):
-                print(f"  {source}: {count}", file=sys.stderr)
-    
+                logger.info("  %s: %d", source, count)
+
     def collect_events(self, verbose: bool = True) -> None:
         """
         Collect events from all log sources.
@@ -2730,14 +2777,12 @@ class LinuxLoginTimeline:
         Args:
             verbose: Whether to print progress information
         """
-        Style.enable_windows_ansi()
-        
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}  Linux Login Timeline Extractor{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Source:{Style.RESET} {self.source_path}", file=sys.stderr)
-            print(f"{Style.INFO}Mode:{Style.RESET} {'UAC Tarball' if self.is_tarball else 'Directory/Filesystem'}", file=sys.stderr)
+            logger.info("=" * 60)
+            logger.info("  Linux Login Timeline Extractor")
+            logger.info("=" * 60)
+            logger.info("Source: %s", self.source_path)
+            logger.info("Mode: %s", "UAC Tarball" if self.is_tarball else "Directory/Filesystem")
         
         if self.is_tarball:
             self._collect_from_tarball(verbose)
@@ -2756,6 +2801,7 @@ class LinuxLoginTimeline:
             "Timestamp_Local",
             "event_type",
             "username",
+            "username_category",
             "source_ip",
             "terminal",
             "pid",
@@ -2784,76 +2830,84 @@ class LinuxLoginTimeline:
             for event in self.events:
                 writer.writerow(event.to_dict())
         
-        print(f"\n{Style.SUCCESS}Timeline exported to:{Style.RESET} {output_path}", file=sys.stderr)
-        print(f"{Style.INFO}Total events:{Style.RESET} {len(self.events)}", file=sys.stderr)
-    
+        logger.log(25, "Timeline exported to: %s", output_path)
+        logger.info("Total events: %d", len(self.events))
+
+        # Export unmatched lines if any were captured
+        if self.unmatched.count:
+            output_dir = os.path.dirname(output_path) or "."
+            if self.hostname:
+                unmatched_name = f"{self.hostname}_login_unmatched.csv"
+            else:
+                unmatched_name = "login_unmatched.csv"
+            unmatched_path = os.path.join(output_dir, unmatched_name)
+            self.unmatched.export_csv(unmatched_path)
+            logger.log(25, "Unmatched lines exported to: %s (%d lines)", unmatched_path, self.unmatched.count)
+
     def print_summary(self) -> None:
         """Print a summary of collected events."""
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-        print(f"{Style.HEADER}{Style.BOLD}  LOGIN/ACTIVITY TIMELINE SUMMARY{Style.RESET}")
-        print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-        
+        logger.info("=" * 60)
+        logger.info("  LOGIN/ACTIVITY TIMELINE SUMMARY")
+        logger.info("=" * 60)
+
         # Event type counts
         event_types = defaultdict(int)
         users = defaultdict(int)
         source_ips = defaultdict(int)
-        
+
         for event in self.events:
             event_types[event.event_type] += 1
             if event.username:
                 users[event.username] += 1
             if event.source_ip:
                 source_ips[event.source_ip] += 1
-        
+
         if self.hostname:
-            print(f"\n{Style.INFO}Hostname:{Style.RESET} {self.hostname}")
-        
-        print(f"\n{Style.INFO}Total Events:{Style.RESET} {Style.GREEN}{len(self.events)}{Style.RESET}")
-        
+            logger.info("Hostname: %s", self.hostname)
+
+        logger.info("Total Events: %d", len(self.events))
+
         if self.events:
             first_ts = self.events[0].timestamp
             last_ts = self.events[-1].timestamp
-            print(f"{Style.INFO}Time Range:{Style.RESET} {first_ts} to {last_ts}")
+            logger.info("Time Range: %s to %s", first_ts, last_ts)
             if first_ts and last_ts:
                 duration = last_ts - first_ts
-                print(f"{Style.INFO}Duration:{Style.RESET} {duration.days} days, {duration.seconds // 3600} hours")
-        
-        print(f"\n{Style.CYAN}Event Types:{Style.RESET}")
+                logger.info("Duration: %d days, %d hours", duration.days, duration.seconds // 3600)
+
+        logger.info("Event Types:")
         for event_type, count in sorted(event_types.items(), key=lambda x: -x[1])[:15]:
-            # Color-code certain event types
             if "FAIL" in event_type or "INVALID" in event_type:
-                print(f"  {Style.RED}{event_type}: {count}{Style.RESET}")
+                logger.warning("  %s: %d", event_type, count)
             elif "LOGIN" in event_type or "SUCCESS" in event_type:
-                print(f"  {Style.GREEN}{event_type}: {count}{Style.RESET}")
+                logger.log(25, "  %s: %d", event_type, count)
             elif "SUDO" in event_type or "SU_" in event_type:
-                print(f"  {Style.YELLOW}{event_type}: {count}{Style.RESET}")
+                logger.warning("  %s: %d", event_type, count)
             else:
-                print(f"  {event_type}: {count}")
-        
+                logger.info("  %s: %d", event_type, count)
+
         if len(event_types) > 15:
-            print(f"  {Style.DIM}... and {len(event_types) - 15} more types{Style.RESET}")
-        
-        print(f"\n{Style.CYAN}Top Users (by activity):{Style.RESET}")
+            logger.debug("  ... and %d more types", len(event_types) - 15)
+
+        logger.info("Top Users (by activity):")
         for user, count in sorted(users.items(), key=lambda x: -x[1])[:10]:
-            # Highlight root/admin users
             if user in ("root", "admin", "administrator"):
-                print(f"  {Style.RED}{user}: {count}{Style.RESET}")
+                logger.warning("  %s: %d", user, count)
             else:
-                print(f"  {user}: {count}")
-        
+                logger.info("  %s: %d", user, count)
+
         if source_ips:
-            print(f"\n{Style.CYAN}Top Source IPs (lateral movement indicators):{Style.RESET}")
+            logger.info("Top Source IPs (lateral movement indicators):")
             for ip, count in sorted(source_ips.items(), key=lambda x: -x[1])[:10]:
-                # Highlight external IPs
-                if not ip.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", 
+                if not ip.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.",
                                       "172.19.", "172.20.", "172.21.", "172.22.", "172.23.",
                                       "172.24.", "172.25.", "172.26.", "172.27.", "172.28.",
                                       "172.29.", "172.30.", "172.31.", "127.")):
-                    print(f"  {Style.YELLOW}{ip}: {count} (external){Style.RESET}")
+                    logger.warning("  %s: %d (external)", ip, count)
                 else:
-                    print(f"  {ip}: {count}")
-        
-        print(f"\n{Style.HEADER}{'='*60}{Style.RESET}")
+                    logger.info("  %s: %d", ip, count)
+
+        logger.info("=" * 60)
 
 
 # ============================================================================
@@ -2878,8 +2932,6 @@ def process_batch(
     Returns:
         Dictionary with processing statistics
     """
-    Style.enable_windows_ansi()
-    
     # Resolve paths
     source_dir = resolve_path(source_dir)
     output_dir = resolve_path(output_dir)
@@ -2896,19 +2948,19 @@ def process_batch(
         tarballs.extend(glob.glob(os.path.join(source_dir, f"*{ext}")))
     
     if not tarballs:
-        print(f"{Style.WARNING}No UAC tarballs found in {source_dir}{Style.RESET}", file=sys.stderr)
+        logger.warning("No UAC tarballs found in %s", source_dir)
         return stats
-    
-    print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-    print(f"{Style.HEADER}{Style.BOLD}  Batch Processing {len(tarballs)} UAC Tarballs{Style.RESET}", file=sys.stderr)
-    print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
+
+    logger.info("=" * 60)
+    logger.info("  Batch Processing %d UAC Tarballs", len(tarballs))
+    logger.info("=" * 60)
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
     for i, tarball_path in enumerate(sorted(tarballs), 1):
         tarball_name = os.path.basename(tarball_path)
-        print(f"\n{Style.INFO}[{i}/{len(tarballs)}] Processing:{Style.RESET} {tarball_name}", file=sys.stderr)
+        logger.info("[%d/%d] Processing: %s", i, len(tarballs), tarball_name)
         
         try:
             # Create timeline
@@ -2939,17 +2991,17 @@ def process_batch(
             stats["total_events"] += len(timeline.events)
             
         except Exception as e:
-            print(f"{Style.ERROR}[!] Failed to process {tarball_name}: {e}{Style.RESET}", file=sys.stderr)
+            logger.error("[!] Failed to process %s: %s", tarball_name, e)
             stats["failed"] += 1
     
     # Print batch summary
-    print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-    print(f"{Style.HEADER}{Style.BOLD}  Batch Processing Complete{Style.RESET}", file=sys.stderr)
-    print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-    print(f"\n  {Style.SUCCESS}Processed:{Style.RESET} {stats['processed']}", file=sys.stderr)
-    print(f"  {Style.ERROR}Failed:{Style.RESET} {stats['failed']}", file=sys.stderr)
-    print(f"  {Style.INFO}Total events:{Style.RESET} {stats['total_events']}", file=sys.stderr)
-    print(f"  {Style.INFO}Output directory:{Style.RESET} {output_dir}", file=sys.stderr)
+    logger.info("=" * 60)
+    logger.info("  Batch Processing Complete")
+    logger.info("=" * 60)
+    logger.log(25, "  Processed: %d", stats["processed"])
+    logger.error("  Failed: %d", stats["failed"])
+    logger.info("  Total events: %d", stats["total_events"])
+    logger.info("  Output directory: %s", output_dir)
     
     return stats
 
@@ -2959,8 +3011,6 @@ def process_batch(
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
-    
     parser = argparse.ArgumentParser(
         description="Extract and timeline Linux login/authentication events from UAC tarballs or directories",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3088,7 +3138,7 @@ from your current working directory. Uses Python standard library only (no pip i
     if args.batch:
         batch_dir = resolve_path(args.batch)
         if not os.path.isdir(batch_dir):
-            print(f"{Style.ERROR}Error: Batch directory does not exist:{Style.RESET} {batch_dir}", file=sys.stderr)
+            logger.error("Error: Batch directory does not exist: %s", batch_dir)
             return 1
         
         # In batch mode, -o specifies output directory
@@ -3112,13 +3162,13 @@ from your current working directory. Uses Python standard library only (no pip i
         # contaminating forensic results with host artifacts. Users
         # must explicitly opt in with --allow-live.
         if not getattr(args, "allow_live", False):
-            print(f"{Style.ERROR}Refusing to use '/' as source without --allow-live (to protect forensic integrity).{Style.RESET}", file=sys.stderr)
-            print(f"{Style.INFO}Hint:{Style.RESET} Specify a tarball or extracted directory with -s/--source, or add --allow-live if you really intend to analyze this host.", file=sys.stderr)
+            logger.error("Refusing to use '/' as source without --allow-live (to protect forensic integrity).")
+            logger.info("Hint: Specify a tarball or extracted directory with -s/--source, or add --allow-live if you really intend to analyze this host.")
             return 1
     
     # Validate source exists
     if source_path != "/" and not os.path.exists(source_path):
-        print(f"{Style.ERROR}Error: Source path does not exist:{Style.RESET} {source_path}", file=sys.stderr)
+        logger.error("Error: Source path does not exist: %s", source_path)
         return 1
     
     # Determine mode
@@ -3153,22 +3203,24 @@ from your current working directory. Uses Python standard library only (no pip i
 
 
 if __name__ == "__main__":
+    from lft.core.logging import setup_logging
+    setup_logging()
+
     # Verify Python version
     if sys.version_info < (3, 6):
-        print("Error: This script requires Python 3.6 or higher.", file=sys.stderr)
-        print(f"Current version: {sys.version}", file=sys.stderr)
+        logger.error("Error: This script requires Python 3.6 or higher.")
+        logger.error("Current version: %s", sys.version)
         sys.exit(1)
-    
+
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n\nOperation cancelled by user.", file=sys.stderr)
+        logger.info("Operation cancelled by user.")
         sys.exit(130)
     except Exception as e:
         import traceback
-        print(f"\nUnexpected error: {e}", file=sys.stderr)
-        print("\nFull traceback:", file=sys.stderr)
-        traceback.print_exc()
-        print("\nPlease report this issue with the full error message.", file=sys.stderr)
+        logger.error("Unexpected error: %s", e)
+        logger.error("Full traceback:\n%s", traceback.format_exc())
+        logger.error("Please report this issue with the full error message.")
         sys.exit(1)
 

@@ -23,13 +23,18 @@ License: MIT
 import argparse
 import csv
 import gzip
+import logging
 import os
 import re
 import sys
 import tarfile
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from lft_uac import UACHandler
+from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.logging import setup_logging
+from lft.core.uac import UACHandler, UnmatchedWriter
+
+logger = logging.getLogger(__name__)
 
 __version__ = "2.0.0"
 
@@ -180,12 +185,18 @@ _RE_DPKG = re.compile(
 )
 
 
-def parse_dpkg_log(content: str, log_file: str) -> List[PackageEvent]:
+def parse_dpkg_log(content: str, log_file: str,
+                   unmatched: UnmatchedWriter = None) -> List[PackageEvent]:
     """Parse Debian/Ubuntu dpkg.log."""
     events: List[PackageEvent] = []
-    for line in content.splitlines():
-        m = _RE_DPKG.match(line.strip())
+    for line_num, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _RE_DPKG.match(stripped)
         if not m:
+            if unmatched:
+                unmatched.add(log_file, line_num, stripped)
             continue
         ts_s, action, pkg, old_v, new_v = m.groups()
         try:
@@ -214,14 +225,27 @@ _RE_APT_PKGS = re.compile(
     r'^(Install|Upgrade|Remove|Purge|Downgrade):\s*(.+)$', re.MULTILINE)
 
 
-def parse_apt_history(content: str, log_file: str) -> List[PackageEvent]:
+def parse_apt_history(content: str, log_file: str,
+                      unmatched: UnmatchedWriter = None) -> List[PackageEvent]:
     """Parse Ubuntu/Debian apt/history.log (block-based format)."""
     events: List[PackageEvent] = []
+    # Track line offsets for unmatched reporting
+    block_start = 1
     for block in re.split(r'\n\s*\n', content):
-        block = block.strip()
-        dm = _RE_APT_DATE.search(block)
-        if not dm:
+        block_stripped = block.strip()
+        block_lines = block.count('\n') + 1
+        if not block_stripped:
+            block_start += block_lines
             continue
+        dm = _RE_APT_DATE.search(block_stripped)
+        if not dm:
+            if unmatched:
+                for i, bline in enumerate(block_stripped.splitlines()):
+                    if bline.strip():
+                        unmatched.add(log_file, block_start + i, bline.strip())
+            block_start += block_lines
+            continue
+        block_start += block_lines
         try:
             ts = datetime.strptime(f"{dm.group(1)} {dm.group(2)}", '%Y-%m-%d %H:%M:%S')
         except ValueError:
@@ -272,14 +296,20 @@ _YUM_ACTION_MAP = {
 
 
 def parse_yum_log(content: str, log_file: str,
-                  reference_year: int = 0) -> List[PackageEvent]:
+                  reference_year: int = 0,
+                  unmatched: UnmatchedWriter = None) -> List[PackageEvent]:
     """Parse CentOS/RHEL yum.log (no year in timestamp)."""
     if not reference_year:
         reference_year = datetime.now().year
     events: List[PackageEvent] = []
-    for line in content.splitlines():
-        m = _RE_YUM.match(line.strip())
+    for line_num, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _RE_YUM.match(stripped)
         if not m:
+            if unmatched:
+                unmatched.add(log_file, line_num, stripped)
             continue
         date_s, action_raw, pkg = m.groups()
         try:
@@ -316,12 +346,18 @@ _DNF_ACTION_MAP = {
 }
 
 
-def parse_dnf_log(content: str, log_file: str) -> List[PackageEvent]:
+def parse_dnf_log(content: str, log_file: str,
+                  unmatched: UnmatchedWriter = None) -> List[PackageEvent]:
     """Parse Fedora/RHEL 8+ dnf.log or dnf.rpm.log."""
     events: List[PackageEvent] = []
-    for line in content.splitlines():
-        m = _RE_DNF.match(line.strip())
+    for line_num, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _RE_DNF.match(stripped)
         if not m:
+            if unmatched:
+                unmatched.add(log_file, line_num, stripped)
             continue
         ts_s, action_raw, pkg_str = m.groups()
         try:
@@ -367,12 +403,18 @@ _RE_PACMAN = re.compile(
 )
 
 
-def parse_pacman_log(content: str, log_file: str) -> List[PackageEvent]:
+def parse_pacman_log(content: str, log_file: str,
+                     unmatched: UnmatchedWriter = None) -> List[PackageEvent]:
     """Parse Arch Linux pacman.log."""
     events: List[PackageEvent] = []
-    for line in content.splitlines():
-        m = _RE_PACMAN.match(line.strip())
+    for line_num, line in enumerate(content.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m = _RE_PACMAN.match(stripped)
         if not m:
+            if unmatched:
+                unmatched.add(log_file, line_num, stripped)
             continue
         ts_s, action, pkg, ver_part = m.groups()
         try:
@@ -444,6 +486,7 @@ class PackageAnalyzer:
         self.source_path = os.path.abspath(source_path)
         self.handler = UACHandler(self.source_path)
         self.events: List[PackageEvent] = []
+        self.unmatched = UnmatchedWriter()
 
     # ------------------------------------------------------------------
     # Analysis
@@ -464,35 +507,34 @@ class PackageAnalyzer:
                     pairs.append((src_type, path, content))
 
         if verbose:
-            print(f"  Found {len(pairs)} package log file(s)", file=sys.stderr)
+            logger.info("Found %d package log file(s)", len(pairs))
 
         parse_dispatch = {
-            'dpkg':   parse_dpkg_log,
-            'apt':    parse_apt_history,
-            'yum':    lambda c, lf: parse_yum_log(c, lf, ref_year),
-            'dnf':    parse_dnf_log,
-            'pacman': parse_pacman_log,
+            'dpkg':   lambda c, lf: parse_dpkg_log(c, lf, unmatched=self.unmatched),
+            'apt':    lambda c, lf: parse_apt_history(c, lf, unmatched=self.unmatched),
+            'yum':    lambda c, lf: parse_yum_log(c, lf, ref_year, unmatched=self.unmatched),
+            'dnf':    lambda c, lf: parse_dnf_log(c, lf, unmatched=self.unmatched),
+            'pacman': lambda c, lf: parse_pacman_log(c, lf, unmatched=self.unmatched),
         }
 
         for src_type, path, content in pairs:
             if verbose:
-                print(f"  Parsing [{src_type}] {path}", file=sys.stderr)
+                logger.info("Parsing [%s] %s", src_type, path)
             try:
                 fn = parse_dispatch.get(src_type)
                 if fn:
                     self.events.extend(fn(content, path))
             except Exception as exc:
-                if verbose:
-                    print(f"    Warning: {exc}", file=sys.stderr)
+                logger.warning("Parse error: %s", exc)
 
         # Sort chronologically; events with no timestamp sort to the end
         self.events.sort(key=lambda e: e.timestamp or datetime.max)
 
         if verbose:
             sus = sum(1 for e in self.events if e.is_suspicious)
-            print(f"  Total events: {len(self.events)}", file=sys.stderr)
+            logger.info("Total events: %d", len(self.events))
             if sus:
-                print(f"  Suspicious packages flagged: {sus}", file=sys.stderr)
+                logger.warning("Suspicious packages flagged: %d", sus)
 
         return self.events
 
@@ -565,8 +607,8 @@ Examples:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"Error: Source not found: {source}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Source not found: %s", source)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     output_dir = os.path.abspath(args.output)
     os.makedirs(output_dir, exist_ok=True)
@@ -578,13 +620,20 @@ Examples:
             out = os.path.join(output_dir, 'package_timeline.csv')
             analyzer.export_csv(out)
             if not args.quiet:
-                print(f"Output: {out}", file=sys.stderr)
+                logger.info("Output: %s", out)
         else:
             if not args.quiet:
-                print("No package events found.", file=sys.stderr)
+                logger.info("No package events found.")
+        # Export unmatched lines
+        if analyzer.unmatched.count > 0:
+            um_path = os.path.join(output_dir, 'package_unmatched.csv')
+            analyzer.unmatched.export_csv(um_path)
+            logger.warning("  %d lines did not match any known format -> %s",
+                           analyzer.unmatched.count, um_path)
     finally:
         analyzer.close()
 
 
 if __name__ == '__main__':
+    setup_logging()
     main()

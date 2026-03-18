@@ -27,13 +27,17 @@ License: MIT
 import argparse
 import csv
 import gzip
+import logging
 import os
 import re
 import sys
 import tarfile
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from lft_uac import UACHandler
+from lft.core.logging import setup_logging
+from lft.core.uac import UACHandler, UnmatchedWriter
+
+logger = logging.getLogger(__name__)
 
 __version__ = "2.0.0"
 
@@ -162,7 +166,7 @@ class NetworkFinding:
             'Protocol':       self.protocol,
             'Action':         self.action,
             'Log_File':       self.log_file,
-            'Raw_Entry':      self.raw_entry[:400],
+            'Raw_Entry':      self.raw_entry[:400] + ' [TRUNCATED]' if len(self.raw_entry) > 400 else self.raw_entry,
         }
 
 
@@ -207,11 +211,11 @@ class WebAccessEvent:
                                  if self.timestamp else '',
             'Client_IP':         self.client_ip,
             'Method':            self.method,
-            'URI':               self.uri[:500],
+            'URI':               self.uri[:500] + ' [TRUNCATED]' if len(self.uri) > 500 else self.uri,
             'Status_Code':       self.status_code,
             'Response_Bytes':    self.response_bytes,
-            'Referrer':          self.referrer[:200],
-            'User_Agent':        self.user_agent[:200],
+            'Referrer':          self.referrer[:200] + ' [TRUNCATED]' if len(self.referrer) > 200 else self.referrer,
+            'User_Agent':        self.user_agent[:200] + ' [TRUNCATED]' if len(self.user_agent) > 200 else self.user_agent,
             'Log_File':          self.log_file,
             'Suspicious':        'Yes' if self.is_suspicious else '',
             'Suspicion_Reason':  self.suspicion_reason,
@@ -533,16 +537,23 @@ def _score_web_request(
 
 
 def parse_web_access_log(content: str, log_file: str,
-                          max_lines: int = 500_000) -> List[WebAccessEvent]:
-    """Parse Apache or Nginx Combined Log Format access log."""
+                          max_lines: int = 0,
+                          unmatched: UnmatchedWriter = None) -> List[WebAccessEvent]:
+    """Parse Apache or Nginx Combined Log Format access log.
+
+    Args:
+        max_lines: Maximum lines to parse.  0 means unlimited (default).
+    """
     events: List[WebAccessEvent] = []
     line_count = 0
     for line in content.splitlines():
-        if line_count >= max_lines:
+        if max_lines > 0 and line_count >= max_lines:
             break
         line_count += 1
         m = _RE_ACCESS_LOG.match(line.strip())
         if not m:
+            if unmatched:
+                unmatched.add(log_file, line_count, line.strip())
             continue
         (client_ip, ts_s, method, uri,
          status_s, bytes_s, referrer, ua) = m.groups()
@@ -590,6 +601,7 @@ class NetworkAnalyzer:
         self.handler = UACHandler(self.source_path)
         self.findings:    List[NetworkFinding] = []
         self.web_events:  List[WebAccessEvent] = []
+        self.unmatched = UnmatchedWriter()
 
     # ------------------------------------------------------------------
     # Orchestration
@@ -632,12 +644,12 @@ class NetworkAnalyzer:
         for label, handler_fn, patterns in checks:
             pairs = self.handler.find_files_by_suffix(patterns)
             if verbose and pairs:
-                print(f"  [{label}] {len(pairs)} file(s)", file=sys.stderr)
+                logger.info("[%s] %d file(s)", label, len(pairs))
             handler_fn(pairs)
 
         if verbose:
-            print(f"  Network findings:  {len(self.findings)}", file=sys.stderr)
-            print(f"  Web access events: {len(self.web_events)}", file=sys.stderr)
+            logger.info("Network findings:  %d", len(self.findings))
+            logger.info("Web access events: %d", len(self.web_events))
 
     # ------------------------------------------------------------------
     # Per-artifact handlers
@@ -671,7 +683,8 @@ class NetworkAnalyzer:
 
     def _check_web(self, pairs: List[Tuple[str, str]]) -> None:
         for path, content in pairs:
-            self.web_events.extend(parse_web_access_log(content, path))
+            self.web_events.extend(parse_web_access_log(content, path,
+                                                         unmatched=self.unmatched))
 
     # ------------------------------------------------------------------
     # Export
@@ -696,20 +709,24 @@ class NetworkAnalyzer:
             writer.writerows(e.to_dict() for e in sorted_findings)
         return output_path
 
-    def export_web_access_csv(self, output_path: str) -> str:
+    def export_web_access_csv(self, output_path: str,
+                              max_rows: int = 0) -> str:
         """
         Export web access events to CSV.
-        Suspicious entries are always included; non-suspicious entries
-        are capped at 50,000 rows to keep file size manageable.
+
+        All events are included by default.  Set *max_rows* > 0 to limit
+        output (suspicious entries are always prioritised).
         """
-        suspicious   = [e for e in self.web_events if e.is_suspicious]
-        normal_cap   = max(0, 50_000 - len(suspicious))
-        normal       = [e for e in self.web_events
-                        if not e.is_suspicious][:normal_cap]
-        rows = sorted(
-            suspicious + normal,
-            key=lambda e: e.timestamp or datetime.max,
-        )
+        if max_rows > 0:
+            suspicious = [e for e in self.web_events if e.is_suspicious]
+            normal_cap = max(0, max_rows - len(suspicious))
+            normal = [e for e in self.web_events
+                      if not e.is_suspicious][:normal_cap]
+            rows = sorted(suspicious + normal,
+                          key=lambda e: e.timestamp or datetime.max)
+        else:
+            rows = sorted(self.web_events,
+                          key=lambda e: e.timestamp or datetime.max)
         fieldnames = [
             'Timestamp_UTC', 'Client_IP', 'Method', 'URI',
             'Status_Code', 'Response_Bytes', 'Referrer', 'User_Agent',
@@ -720,6 +737,10 @@ class NetworkAnalyzer:
             writer.writeheader()
             writer.writerows(e.to_dict() for e in rows)
         return output_path
+
+    def export_unmatched_csv(self, output_path: str) -> Optional[str]:
+        """Export lines that didn't match the access-log regex."""
+        return self.unmatched.export_csv(output_path)
 
     def close(self):
         self.handler.close()
@@ -769,7 +790,7 @@ Examples:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"Error: Source not found: {source}", file=sys.stderr)
+        logger.error("Source not found: %s", source)
         sys.exit(1)
 
     output_dir = os.path.abspath(args.output)
@@ -783,20 +804,26 @@ Examples:
             out = os.path.join(output_dir, 'network_findings.csv')
             analyzer.export_findings_csv(out)
             if not args.quiet:
-                print(f"Network findings: {out}", file=sys.stderr)
+                logger.info("Network findings: %s", out)
 
         if analyzer.web_events:
             out = os.path.join(output_dir, 'web_access.csv')
             analyzer.export_web_access_csv(out)
             if not args.quiet:
-                print(f"Web access: {out}", file=sys.stderr)
+                logger.info("Web access: %s", out)
+
+        out = os.path.join(output_dir, 'network_unmatched.csv')
+        if analyzer.export_unmatched_csv(out):
+            if not args.quiet:
+                logger.info("Unmatched web-log lines: %s", out)
 
         if not analyzer.findings and not analyzer.web_events:
             if not args.quiet:
-                print("No network artifacts found.", file=sys.stderr)
+                logger.info("No network artifacts found.")
     finally:
         analyzer.close()
 
 
 if __name__ == '__main__':
+    setup_logging()
     main()

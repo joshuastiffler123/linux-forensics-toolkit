@@ -31,6 +31,7 @@ import bz2
 import csv
 import gzip
 import io
+import logging
 import lzma
 import os
 import re
@@ -40,8 +41,10 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
+from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.uac import UnmatchedWriter
 
-from lft_style import Style
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -78,6 +81,14 @@ SCAN_PATHS = [
     'var/spool/',
     'opt/',
     'usr/local/',
+    'usr/bin/',
+    'usr/sbin/',
+    'usr/lib/',
+    'usr/share/',
+    'lib/',
+    'sbin/',
+    'srv/',
+    'run/',
 ]
 
 
@@ -111,12 +122,14 @@ class IOCScanner:
         '.db', '.sqlite', '.sqlite3',
     }
 
-    # Max file size to scan (50MB)
-    MAX_FILE_SIZE = 50 * 1024 * 1024
+    # Max file size to scan (200MB)
+    MAX_FILE_SIZE = 200 * 1024 * 1024
 
-    def __init__(self, source_path: str, ioc_file: str):
+    def __init__(self, source_path: str, ioc_file: str, max_file_size: int = None):
         self.source_path = os.path.abspath(source_path)
         self.ioc_file = os.path.abspath(ioc_file)
+        if max_file_size is not None:
+            self.MAX_FILE_SIZE = max_file_size
         self.is_tarball = any(source_path.lower().endswith(ext)
                               for ext in self.TAR_EXTENSIONS)
         self.tar = None
@@ -127,6 +140,7 @@ class IOCScanner:
         self.matches: List[IOCMatch] = []
         self.files_scanned = 0
         self.files_matched = 0
+        self.unmatched = UnmatchedWriter()
 
         self._load_iocs()
 
@@ -223,7 +237,11 @@ class IOCScanner:
 
     def _should_scan_file(self, name: str, size: int) -> bool:
         """Decide whether a file should be scanned."""
-        if size > self.MAX_FILE_SIZE or size == 0:
+        if size == 0:
+            return False
+        if size > self.MAX_FILE_SIZE:
+            logger.debug("IOC scan: skipping %s (%.1f MB > %.1f MB limit)",
+                         name, size / 1e6, self.MAX_FILE_SIZE / 1e6)
             return False
 
         lower = name.lower()
@@ -400,9 +418,9 @@ class IOCScanner:
             except Exception:
                 continue
 
-        if verbose and total_matches:
-            print(f"  {Style.WARNING}[!] Found {total_matches} IOC hits in "
-                  f"analysis output{Style.RESET}", file=sys.stderr)
+        if total_matches:
+            logger.warning("[!] Found %d IOC hits in analysis output",
+                           total_matches)
 
         return total_matches
 
@@ -420,14 +438,10 @@ class IOCScanner:
         self.hostname = self._get_hostname()
 
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}IOC Scanner{Style.RESET}",
-                  file=sys.stderr)
-            print(f"  {Style.INFO}Source:{Style.RESET} {self.source_path}",
-                  file=sys.stderr)
-            print(f"  {Style.INFO}IOC File:{Style.RESET} {self.ioc_file}",
-                  file=sys.stderr)
-            print(f"  {Style.INFO}IOCs Loaded:{Style.RESET} {len(self.iocs)}",
-                  file=sys.stderr)
+            logger.info("IOC Scanner")
+            logger.info("Source: %s", self.source_path)
+            logger.info("IOC File: %s", self.ioc_file)
+            logger.info("IOCs Loaded: %d", len(self.iocs))
 
         if self.is_tarball:
             total = self._scan_tarball(verbose)
@@ -435,22 +449,20 @@ class IOCScanner:
             total = self._scan_directory(verbose)
 
         if verbose:
-            color = Style.WARNING if total > 0 else Style.SUCCESS
-            print(f"\n  {color}Results: {total} IOC matches in "
-                  f"{self.files_matched}/{self.files_scanned} files scanned"
-                  f"{Style.RESET}", file=sys.stderr)
-
             if total > 0:
+                logger.warning("Results: %d IOC matches in %d/%d files scanned",
+                               total, self.files_matched, self.files_scanned)
                 # Show summary by IOC
                 ioc_counts: Dict[str, int] = defaultdict(int)
                 for match in self.matches:
                     ioc_counts[match.ioc] += 1
-                print(f"\n  {Style.WARNING}IOC Hit Summary:{Style.RESET}",
-                      file=sys.stderr)
+                logger.warning("IOC Hit Summary:")
                 for ioc, count in sorted(ioc_counts.items(),
                                           key=lambda x: -x[1]):
-                    print(f"    {count:>4} hits: {ioc[:80]}",
-                          file=sys.stderr)
+                    logger.warning("  %4d hits: %s", count, ioc[:80])
+            else:
+                logger.log(25, "Results: %d IOC matches in %d/%d files scanned",
+                           total, self.files_matched, self.files_scanned)
 
         return total
 
@@ -485,7 +497,8 @@ class IOCScanner:
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    from lft.core.logging import setup_logging
+    setup_logging()
 
     parser = argparse.ArgumentParser(
         description="Linux IOC Scanner - Indicator of Compromise Matching",
@@ -526,15 +539,13 @@ Output:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"{Style.ERROR}Error: Source not found: {source}{Style.RESET}",
-              file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Source not found: %s", source)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     ioc_file = os.path.abspath(args.iocs)
     if not os.path.isfile(ioc_file):
-        print(f"{Style.ERROR}Error: IOC file not found: {ioc_file}"
-              f"{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: IOC file not found: %s", ioc_file)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     output_dir = os.path.abspath(args.output)
     os.makedirs(output_dir, exist_ok=True)
@@ -551,11 +562,18 @@ Output:
 
         if not args.quiet:
             if path:
-                print(f"\n{Style.SUCCESS}Output: {path}{Style.RESET}",
-                      file=sys.stderr)
+                logger.log(25, "Output: %s", path)
             else:
-                print(f"\n{Style.SUCCESS}No IOC matches found{Style.RESET}",
-                      file=sys.stderr)
+                logger.log(25, "No IOC matches found")
+
+        # Export unmatched lines if any were captured
+        if scanner.unmatched.count > 0:
+            hostname = scanner.hostname or "unknown"
+            unmatched_name = f"{hostname}_ioc_scanner_unmatched.csv"
+            unmatched_path = os.path.join(output_dir, unmatched_name)
+            scanner.unmatched.export_csv(unmatched_path)
+            logger.warning("  %d lines did not match any known pattern -> %s",
+                           scanner.unmatched.count, unmatched_path)
     finally:
         scanner.close()
 

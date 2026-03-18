@@ -64,6 +64,7 @@ import csv
 import gzip
 import hashlib
 import io
+import logging
 import os
 import re
 import stat
@@ -79,8 +80,10 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 __version__ = "2.0.0"
 
 
-from lft_style import Style
-from lft_uac import UACHandler, is_safe_path, safe_read_member, calculate_hashes
+from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.uac import UACHandler, UnmatchedWriter, is_safe_path, safe_read_member, calculate_hashes
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -613,20 +616,19 @@ class PersistenceHunter:
         self.handler = UACHandler(source_path)
         self.findings: List[PersistenceFinding] = []
         self.stats = defaultdict(int)
+        self.unmatched = UnmatchedWriter()
     
     def close(self):
         self.handler.close()
     
     def hunt(self, verbose: bool = True) -> None:
         """Run all detection checks."""
-        Style.enable_windows_ansi()
-        
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}  Linux Persistence Hunter v{__version__}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}  PANIX-Style Persistence Detection{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Source:{Style.RESET} {self.source_path}", file=sys.stderr)
+            logger.info("%s", "=" * 60)
+            logger.info("  Linux Persistence Hunter v%s", __version__)
+            logger.info("  PANIX-Style Persistence Detection")
+            logger.info("%s", "=" * 60)
+            logger.info("Source: %s", self.source_path)
         
         checks = [
             ("Cron Jobs", self._check_cron),
@@ -682,14 +684,13 @@ class PersistenceHunter:
 
         for i, (name, check_func) in enumerate(checks, 1):
             if verbose:
-                print(f"\n{Style.INFO}[{i}/{len(checks)}] Checking {name}...{Style.RESET}", file=sys.stderr)
+                logger.info("[%d/%d] Checking %s...", i, len(checks), name)
             try:
                 count = check_func()
-                if verbose and count > 0:
-                    print(f"  {Style.WARNING}Found {count} suspicious items{Style.RESET}", file=sys.stderr)
+                if count > 0:
+                    logger.warning("  Found %d suspicious items", count)
             except Exception as e:
-                if verbose:
-                    print(f"  {Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
+                logger.error("  Error: %s", e)
         
         if verbose:
             self._print_summary()
@@ -1048,11 +1049,15 @@ class PersistenceHunter:
             except Exception:
                 continue
             
-            lines = [l.strip() for l in content.split('\n') if l.strip() and not l.startswith('#')]
-            
-            for line_num, line in enumerate(lines, 1):
+            for line_num, line in enumerate(content.split('\n'), 1):
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#'):
+                    continue
+
+                matched = False
+
                 # Check for command= option (could be backdoor)
-                if 'command=' in line:
+                if 'command=' in line_stripped:
                     self._add_finding(
                         filepath=filepath,
                         technique_key="authorized_keys",
@@ -1060,12 +1065,13 @@ class PersistenceHunter:
                         description="SSH key with forced command - potential backdoor",
                         indicator="command=",
                         line_number=line_num,
-                        raw_content=line[:200]
+                        raw_content=line_stripped[:200]
                     )
                     count += 1
-                
+                    matched = True
+
                 # Check for environment= option
-                if 'environment=' in line:
+                if 'environment=' in line_stripped:
                     self._add_finding(
                         filepath=filepath,
                         technique_key="authorized_keys",
@@ -1073,23 +1079,28 @@ class PersistenceHunter:
                         description="SSH key with environment modification",
                         indicator="environment=",
                         line_number=line_num,
-                        raw_content=line[:200]
+                        raw_content=line_stripped[:200]
                     )
                     count += 1
-                
+                    matched = True
+
                 # Check for from= restriction bypass
-                if 'no-' in line and 'permitopen' not in line:
+                if 'no-' in line_stripped and 'permitopen' not in line_stripped:
                     # Multiple no-* options might indicate restriction bypass attempts
-                    if line.count('no-') >= 3:
+                    if line_stripped.count('no-') >= 3:
                         self._add_finding(
                             filepath=filepath,
                             technique_key="authorized_keys",
                             severity="LOW",
                             description="SSH key with multiple restrictions (review)",
                             line_number=line_num,
-                            raw_content=line[:200]
+                            raw_content=line_stripped[:200]
                         )
                         count += 1
+                        matched = True
+
+                if not matched:
+                    self.unmatched.add(filepath, line_num, line_stripped)
         
         return count
     
@@ -1114,18 +1125,19 @@ class PersistenceHunter:
         known_root = {'root'}
         
         for line_num, line in enumerate(content.split('\n'), 1):
-            if not line or line.startswith('#'):
+            if not line.strip() or line.startswith('#'):
                 continue
-            
+
             parts = line.split(':')
             if len(parts) < 7:
+                self.unmatched.add("etc/passwd", line_num, line)
                 continue
-            
+
             username = parts[0]
             uid = parts[2]
             gid = parts[3]
             shell = parts[6]
-            
+
             # Check for additional UID=0 users
             if uid == '0' and username not in known_root:
                 self._add_finding(
@@ -1436,22 +1448,24 @@ class PersistenceHunter:
                 continue
             
             for line_num, line in enumerate(content.split('\n'), 1):
-                line = line.strip()
-                if not line or line.startswith('#') or line.startswith('include'):
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#') or line_stripped.startswith('include'):
                     continue
-                
+
                 # Suspicious library paths
-                if any(p in line for p in ['/tmp', '/var/tmp', '/dev/shm', '/home']):
+                if any(p in line_stripped for p in ['/tmp', '/var/tmp', '/dev/shm', '/home']):
                     self._add_finding(
                         filepath=conf_file,
                         technique_key="ld_preload",
                         severity="HIGH",
                         description=f"Suspicious library path in ld.so.conf",
-                        indicator=line,
+                        indicator=line_stripped,
                         line_number=line_num
                     )
                     count += 1
-        
+                else:
+                    self.unmatched.add(conf_file, line_num, line_stripped)
+
         return count
     
     # ========================================================================
@@ -2272,16 +2286,17 @@ class PersistenceHunter:
             return count
         
         for line_num, line in enumerate(content.split('\n'), 1):
-            if not line or line.startswith('#'):
+            if not line.strip() or line.startswith('#'):
                 continue
-            
+
             parts = line.split(':')
             if len(parts) < 2:
+                self.unmatched.add("etc/shadow", line_num, line)
                 continue
-            
+
             username = parts[0]
             password_hash = parts[1]
-            
+
             # Check for empty password (no authentication required)
             if password_hash == '':
                 self._add_finding(
@@ -2469,23 +2484,28 @@ class PersistenceHunter:
                 continue
             
             for line_num, line in enumerate(content.split('\n'), 1):
-                line = line.strip()
-                if not line or line.startswith('#') or line.startswith('include'):
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#') or line_stripped.startswith('include'):
                     continue
-                
+
                 # Check for suspicious paths
+                matched = False
                 for susp_path in suspicious_lib_paths:
-                    if susp_path in line:
+                    if susp_path in line_stripped:
                         self._add_finding(
                             filepath=filepath,
                             technique_key="ld_preload",
                             severity="HIGH",
                             description=f"Suspicious library path in linker config",
-                            indicator=line,
+                            indicator=line_stripped,
                             line_number=line_num
                         )
                         count += 1
+                        matched = True
                         break
+
+                if not matched:
+                    self.unmatched.add(filepath, line_num, line_stripped)
         
         return count
     
@@ -2527,7 +2547,8 @@ class PersistenceHunter:
                     line_stripped = line.strip()
                     if not line_stripped or line_stripped.startswith('#'):
                         continue
-                    
+
+                    matched = False
                     for pattern, description in SSHD_CONFIG_PATTERNS:
                         if re.search(pattern, line_stripped, re.IGNORECASE):
                             severity = "HIGH" if "Root" in description or "Empty" in description else "MEDIUM"
@@ -2541,6 +2562,10 @@ class PersistenceHunter:
                                 raw_content=line[:200]
                             )
                             count += 1
+                            matched = True
+
+                    if not matched:
+                        self.unmatched.add(filepath, line_num, line_stripped)
         
         return count
     
@@ -2582,7 +2607,8 @@ class PersistenceHunter:
                 line_stripped = line.strip()
                 if not line_stripped or line_stripped.startswith('#'):
                     continue
-                
+
+                matched = False
                 for pattern, description in ENVIRONMENT_PERSISTENCE_PATTERNS:
                     if re.search(pattern, line_stripped, re.IGNORECASE):
                         severity = "HIGH" if "LD_PRELOAD" in description else "MEDIUM"
@@ -2596,6 +2622,10 @@ class PersistenceHunter:
                             raw_content=line[:200]
                         )
                         count += 1
+                        matched = True
+
+                if not matched:
+                    self.unmatched.add(filepath, line_num, line_stripped)
         
         # Search for LD_PRELOAD in etc and home directories
         search_patterns = [r'etc/.*', r'home/.*']
@@ -3136,7 +3166,9 @@ class PersistenceHunter:
                     line_stripped = line.strip()
                     if not line_stripped or line_stripped.startswith('#'):
                         continue
-                    
+
+                    matched = False
+
                     # Check for suspicious modules
                     for susp_mod in suspicious_modules:
                         if susp_mod in line_stripped.lower():
@@ -3150,7 +3182,8 @@ class PersistenceHunter:
                                 raw_content=line[:200]
                             )
                             count += 1
-                    
+                            matched = True
+
                     # Check for suspicious options
                     for pattern, description in suspicious_options:
                         if re.search(pattern, line_stripped, re.IGNORECASE):
@@ -3164,6 +3197,10 @@ class PersistenceHunter:
                                 raw_content=line[:200]
                             )
                             count += 1
+                            matched = True
+
+                    if not matched:
+                        self.unmatched.add(filepath, line_num, line_stripped)
         
         return count
     
@@ -3614,34 +3651,35 @@ class PersistenceHunter:
     
     def _print_summary(self) -> None:
         """Print detection summary."""
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}  Detection Summary{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-        
+        logger.info("%s", "=" * 60)
+        logger.info("  Detection Summary")
+        logger.info("%s", "=" * 60)
+
         # Count by severity
         severity_counts = defaultdict(int)
         for finding in self.findings:
             severity_counts[finding.severity] += 1
-        
-        print(f"\n{Style.INFO}Findings by Severity:{Style.RESET}", file=sys.stderr)
+
+        logger.info("Findings by Severity:")
+        severity_log = {
+            "CRITICAL": logger.critical,
+            "HIGH": logger.error,
+            "MEDIUM": logger.warning,
+            "LOW": logger.info,
+            "INFO": logger.debug,
+        }
         for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
             count = severity_counts.get(severity, 0)
             if count > 0:
-                color = {
-                    "CRITICAL": Style.CRITICAL,
-                    "HIGH": Style.ERROR,
-                    "MEDIUM": Style.WARNING,
-                    "LOW": Style.INFO,
-                    "INFO": Style.DIM
-                }.get(severity, Style.RESET)
-                print(f"  {color}{severity}: {count}{Style.RESET}", file=sys.stderr)
-        
-        print(f"\n{Style.INFO}Findings by Technique:{Style.RESET}", file=sys.stderr)
+                log_func = severity_log.get(severity, logger.info)
+                log_func("  %s: %d", severity, count)
+
+        logger.info("Findings by Technique:")
         for tech, count in sorted(self.stats.items()):
             technique_name, mitre_id = MITRE_MAPPINGS.get(tech, (tech, "N/A"))
-            print(f"  {technique_name} ({mitre_id}): {count}", file=sys.stderr)
-        
-        print(f"\n{Style.SUCCESS}Total Findings: {len(self.findings)}{Style.RESET}", file=sys.stderr)
+            logger.info("  %s (%s): %d", technique_name, mitre_id, count)
+
+        logger.log(25, "Total Findings: %d", len(self.findings))
     
     def _get_hostname(self) -> str:
         """Try to determine hostname from the source."""
@@ -3907,7 +3945,7 @@ class PersistenceHunter:
     def export_csv(self, output_path: str) -> None:
         """Export findings to CSV and raw scheduled task files to subdirectory."""
         if not self.findings:
-            print(f"{Style.INFO}No findings to export{Style.RESET}", file=sys.stderr)
+            logger.info("No findings to export")
             return
 
         # If output_path is a directory, create a filename inside it
@@ -3925,9 +3963,9 @@ class PersistenceHunter:
         if output_dir:
             exported_count = self._export_raw_scheduled_tasks(output_dir)
             if exported_count > 0:
-                print(f"{Style.INFO}Exported {exported_count} raw scheduled task "
-                      f"file(s) to: {os.path.join(output_dir, 'raw_scheduled_tasks')}"
-                      f"{Style.RESET}", file=sys.stderr)
+                logger.info("Exported %d raw scheduled task file(s) to: %s",
+                            exported_count,
+                            os.path.join(output_dir, 'raw_scheduled_tasks'))
 
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             fieldnames = ["Filepath", "Technique", "MITRE_ATT&CK_ID", "Severity",
@@ -3947,7 +3985,16 @@ class PersistenceHunter:
             )):
                 writer.writerow(finding.to_dict())
 
-        print(f"{Style.SUCCESS}Findings exported to:{Style.RESET} {output_path}", file=sys.stderr)
+        logger.log(25, "Findings exported to: %s", output_path)
+
+        # Export unmatched lines if any were captured
+        if self.unmatched.count > 0:
+            hostname = self._get_hostname()
+            unmatched_name = f"{hostname}_persistence_unmatched.csv"
+            unmatched_path = os.path.join(output_dir or ".", unmatched_name)
+            self.unmatched.export_csv(unmatched_path)
+            logger.warning("  %d lines did not match any known pattern -> %s",
+                           self.unmatched.count, unmatched_path)
 
 
 # ============================================================================
@@ -3955,7 +4002,8 @@ class PersistenceHunter:
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    from lft.core.logging import setup_logging
+    setup_logging()
     
     parser = argparse.ArgumentParser(
         description="Detect Linux persistence mechanisms (PANIX-style)",
@@ -4047,8 +4095,8 @@ Reference: https://github.com/Aegrah/PANIX
         source_path = os.path.abspath(source_path)
     
     if not os.path.exists(source_path):
-        print(f"{Style.ERROR}Error: Source path does not exist: {source_path}{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Source path does not exist: %s", source_path)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
     
     try:
         hunter = PersistenceHunter(source_path)
@@ -4062,13 +4110,13 @@ Reference: https://github.com/Aegrah/PANIX
         hunter.close()
         
     except KeyboardInterrupt:
-        print(f"\n{Style.WARNING}Hunt interrupted by user{Style.RESET}", file=sys.stderr)
-        sys.exit(130)
+        logger.warning("Hunt interrupted by user")
+        sys.exit(EXIT_SIGINT)
     except Exception as e:
-        print(f"\n{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: %s", e)
         import traceback
         traceback.print_exc()
-        sys.exit(1)
+        sys.exit(EXIT_ERROR)
 
 
 if __name__ == "__main__":

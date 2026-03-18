@@ -30,6 +30,7 @@ import bz2
 import csv
 import gzip
 import io
+import logging
 import lzma
 import os
 import re
@@ -39,8 +40,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
+from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.logging import setup_logging
+from lft.core.uac import UnmatchedWriter
 
-from lft_style import Style
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -131,6 +135,7 @@ class StringAnalyzer:
         self.syslog_entries: List[LogEntry] = []
         self.weblog_entries: List[LogEntry] = []
         self.security_entries: List[LogEntry] = []
+        self.unmatched = UnmatchedWriter()
 
         if self.is_tarball:
             self._open_tarball()
@@ -288,54 +293,57 @@ class StringAnalyzer:
 
         for source_file, data in files:
             text = data.decode('utf-8', errors='replace')
-            for line in text.splitlines():
+            for line_number, line in enumerate(text.splitlines(), 1):
                 line = line.strip()
                 if not line:
                     continue
 
                 m = AUDIT_LOG_RE.match(line)
-                if m:
-                    audit_type = m.group(1)
-                    epoch_str = m.group(2)
-                    serial = m.group(3)
-                    message = m.group(4)
+                if not m:
+                    self.unmatched.add(source_file, line_number, line)
+                    continue
 
-                    # Dedup
-                    key = f"{epoch_str}:{serial}"
-                    if key in seen:
-                        continue
-                    seen.add(key)
+                audit_type = m.group(1)
+                epoch_str = m.group(2)
+                serial = m.group(3)
+                message = m.group(4)
 
-                    try:
-                        epoch = float(epoch_str)
-                        ts = datetime.fromtimestamp(
-                            epoch, tz=timezone.utc).strftime(
-                            "%Y-%m-%d %H:%M:%S")
-                    except (ValueError, OSError, OverflowError):
-                        ts = epoch_str
+                # Dedup
+                key = f"{epoch_str}:{serial}"
+                if key in seen:
+                    continue
+                seen.add(key)
 
-                    entry = LogEntry(
-                        category="audit",
-                        timestamp=ts,
-                        raw_line=line,
-                        source_file=source_file,
-                        process=audit_type,
-                        message=message
-                    )
-                    self.audit_entries.append(entry)
+                try:
+                    epoch = float(epoch_str)
+                    ts = datetime.fromtimestamp(
+                        epoch, tz=timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S")
+                except (ValueError, OSError, OverflowError):
+                    ts = epoch_str
 
-                    # Also flag as security if relevant
-                    if audit_type in ('USER_AUTH', 'USER_END', 'USER_LOGIN',
-                                      'USER_START', 'CRED_ACQ', 'CRED_DISP',
-                                      'USER_ACCT', 'ANOM_LOGIN_FAILURES',
-                                      'EXECVE', 'SYSCALL'):
-                        self.security_entries.append(entry)
+                entry = LogEntry(
+                    category="audit",
+                    timestamp=ts,
+                    raw_line=line,
+                    source_file=source_file,
+                    process=audit_type,
+                    message=message
+                )
+                self.audit_entries.append(entry)
 
-                    count += 1
+                # Also flag as security if relevant
+                if audit_type in ('USER_AUTH', 'USER_END', 'USER_LOGIN',
+                                  'USER_START', 'CRED_ACQ', 'CRED_DISP',
+                                  'USER_ACCT', 'ANOM_LOGIN_FAILURES',
+                                  'EXECVE', 'SYSCALL'):
+                    self.security_entries.append(entry)
+
+                count += 1
 
         if verbose:
-            print(f"  {Style.INFO}[+] Extracted {count} audit log entries "
-                  f"from {len(files)} file(s){Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d audit log entries from %d file(s)",
+                        count, len(files))
         return count
 
     # ------------------------------------------------------------------
@@ -356,7 +364,7 @@ class StringAnalyzer:
 
         for source_file, data in files:
             text = data.decode('utf-8', errors='replace')
-            for line in text.splitlines():
+            for line_number, line in enumerate(text.splitlines(), 1):
                 line = line.strip()
                 if not line:
                     continue
@@ -435,10 +443,14 @@ class StringAnalyzer:
                         self.security_entries.append(entry)
 
                     count += 1
+                    continue
+
+                # No syslog pattern matched
+                self.unmatched.add(source_file, line_number, line)
 
         if verbose:
-            print(f"  {Style.INFO}[+] Extracted {count} syslog entries "
-                  f"from {len(files)} file(s){Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d syslog entries from %d file(s)",
+                        count, len(files))
         return count
 
     # ------------------------------------------------------------------
@@ -489,46 +501,49 @@ class StringAnalyzer:
 
         for source_file, data in files:
             text = data.decode('utf-8', errors='replace')
-            for line in text.splitlines():
+            for line_number, line in enumerate(text.splitlines(), 1):
                 line = line.strip()
                 if not line:
                     continue
 
                 m = WEBLOG_RE.match(line)
-                if m:
-                    if line in seen:
-                        continue
-                    seen.add(line)
+                if not m:
+                    self.unmatched.add(source_file, line_number, line)
+                    continue
 
-                    ip = m.group(1)
-                    user = m.group(2)
-                    ts = m.group(3)
-                    request = m.group(4)
+                if line in seen:
+                    continue
+                seen.add(line)
 
-                    # Parse timestamp
-                    try:
-                        dt = datetime.strptime(
-                            ts, "%d/%b/%Y:%H:%M:%S %z")
-                        ts_norm = dt.astimezone(timezone.utc).strftime(
-                            "%Y-%m-%d %H:%M:%S")
-                    except (ValueError, OSError):
-                        ts_norm = ts
+                ip = m.group(1)
+                user = m.group(2)
+                ts = m.group(3)
+                request = m.group(4)
 
-                    entry = LogEntry(
-                        category="weblog",
-                        timestamp=ts_norm,
-                        raw_line=line,
-                        source_file=source_file,
-                        hostname=ip,
-                        process="webserver",
-                        message=f"{request} (user={user})"
-                    )
-                    self.weblog_entries.append(entry)
-                    count += 1
+                # Parse timestamp
+                try:
+                    dt = datetime.strptime(
+                        ts, "%d/%b/%Y:%H:%M:%S %z")
+                    ts_norm = dt.astimezone(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S")
+                except (ValueError, OSError):
+                    ts_norm = ts
+
+                entry = LogEntry(
+                    category="weblog",
+                    timestamp=ts_norm,
+                    raw_line=line,
+                    source_file=source_file,
+                    hostname=ip,
+                    process="webserver",
+                    message=f"{request} (user={user})"
+                )
+                self.weblog_entries.append(entry)
+                count += 1
 
         if verbose:
-            print(f"  {Style.INFO}[+] Extracted {count} web log entries "
-                  f"from {len(files)} file(s){Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d web log entries from %d file(s)",
+                        count, len(files))
         return count
 
     # ------------------------------------------------------------------
@@ -623,8 +638,8 @@ class StringAnalyzer:
                     count += 1
 
         if verbose:
-            print(f"  {Style.INFO}[+] Extracted {count} security entries from "
-                  f"{len(files)} compressed log(s){Style.RESET}", file=sys.stderr)
+            logger.info("[+] Extracted %d security entries from %d compressed log(s)",
+                        count, len(files))
         return count
 
     # ------------------------------------------------------------------
@@ -641,10 +656,8 @@ class StringAnalyzer:
         self.hostname = self._get_hostname()
 
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}String Analyzer{Style.RESET}",
-                  file=sys.stderr)
-            print(f"  {Style.INFO}Source:{Style.RESET} {self.source_path}",
-                  file=sys.stderr)
+            logger.info("String Analyzer")
+            logger.info("Source: %s", self.source_path)
 
         results = {}
         results['audit'] = self._extract_audit_logs(verbose)
@@ -655,9 +668,8 @@ class StringAnalyzer:
 
         if verbose:
             total = sum(v for k, v in results.items() if k != 'security_total')
-            print(f"\n  {Style.SUCCESS}Total: {total} log entries extracted, "
-                  f"{results['security_total']} security-relevant"
-                  f"{Style.RESET}", file=sys.stderr)
+            logger.log(25, "Total: %d log entries extracted, %d security-relevant",
+                        total, results['security_total'])
 
         return results
 
@@ -700,6 +712,13 @@ class StringAnalyzer:
             self._write_entries_csv(path, self.security_entries)
             output_files.append(path)
 
+        # Unmatched lines
+        unmatched_path = os.path.join(output_dir,
+                                      f"{hostname}_strings_unmatched.csv")
+        result = self.unmatched.export_csv(unmatched_path)
+        if result:
+            output_files.append(result)
+
         return output_files
 
     @staticmethod
@@ -722,7 +741,7 @@ class StringAnalyzer:
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    setup_logging()
 
     parser = argparse.ArgumentParser(
         description="Linux String Analyzer - Log Carving and Extraction",
@@ -753,9 +772,8 @@ Output Files:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"{Style.ERROR}Error: Source not found: {source}{Style.RESET}",
-              file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Source not found: %s", source)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     output_dir = os.path.abspath(args.output)
     os.makedirs(output_dir, exist_ok=True)
@@ -766,10 +784,9 @@ Output Files:
         files = analyzer.export_csv(output_dir)
 
         if not args.quiet:
-            print(f"\n{Style.SUCCESS}Output files:{Style.RESET}",
-                  file=sys.stderr)
+            logger.log(25, "Output files:")
             for f in files:
-                print(f"  {f}", file=sys.stderr)
+                logger.log(25, "  %s", f)
     finally:
         analyzer.close()
 

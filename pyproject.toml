@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "linux-forensics-toolkit"
-version = "2.0.0"
+version = "2.1.0"
 description = "Linux IR forensic triage toolkit for analyzing UAC collections"
 readme = "README.md"
 license = {text = "MIT"}
@@ -30,23 +30,14 @@ memory = ["volatility3>=2.0.0"]
 
 [project.scripts]
 # After `pip install -e .`, the `lfa` command is available system-wide
-lfa = "linux_analyzer:main"
+lfa = "lft.cli:main"
 
-[tool.setuptools]
-# Individual top-level modules (no package directory required)
-py-modules = [
-    "lft_style",
-    "lft_uac",
-    "linux_analyzer",
-    "linux_login_timeline",
-    "linux_journal_analyzer",
-    "linux_persistence_hunter",
-    "linux_security_analyzer",
-    "linux_memory_analyzer",
-    "linux_package_analyzer",
-    "linux_network_analyzer",
-    "linux_filesystem_timeline",
-    "linux_ioc_scanner",
-    "linux_misc_artifacts",
-    "linux_string_analyzer",
-]
+[project.gui-scripts]
+# GUI entry point — launches the tkinter interface
+lfa-gui = "lft.gui:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

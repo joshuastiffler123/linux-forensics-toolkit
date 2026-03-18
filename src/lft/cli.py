@@ -40,9 +40,18 @@ from typing import Dict, List, Optional, Tuple
 
 __version__ = "2.0.0"
 
+import logging
 
-from lft_style import Style
-from lft_uac import UACHandler
+from lft.core.config import default_config, load_config, save_config, merge_cli_args, ToolkitConfig
+from lft.core.errors import SourceNotFoundError, EXIT_OK, EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.logging import setup_logging
+from lft.core.uac import UACHandler
+
+logger = logging.getLogger(__name__)
+
+# Active configuration — set by run_analysis() so wrapper functions can
+# access per-analyzer settings without changing their call signatures.
+_active_config: 'ToolkitConfig' = None  # type: ignore[assignment]
 
 
 # ============================================================================
@@ -733,7 +742,7 @@ def run_login_timeline(source_path: str, output_dir: str, hostname: str) -> Dict
 
     try:
         # Import the module
-        import linux_login_timeline as llt
+        from lft.analyzers import login_timeline as llt
 
         # Create timeline object
         timeline = llt.LinuxLoginTimeline(source_path)
@@ -782,7 +791,7 @@ def run_journal_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
     
     try:
         # Import the module
-        import linux_journal_analyzer as lja
+        from lft.analyzers import journal as lja
         
         # Create handler and parser
         handler = lja.UACHandler(source_path)
@@ -805,7 +814,8 @@ def run_journal_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         if entries:
             # Export all entries
             all_path = os.path.join(output_dir, f"{hostname}_journal.csv")
-            lja.export_csv(entries, all_path)
+            _max_msg = _active_config.max_message_length if _active_config else None
+            lja.export_csv(entries, all_path, max_message_length=_max_msg)
             result["output_files"].append(all_path)
             
             # Export security events
@@ -843,7 +853,7 @@ def run_persistence_hunter(source_path: str, output_dir: str, hostname: str) -> 
     }
 
     try:
-        import linux_persistence_hunter as lph
+        from lft.analyzers import persistence as lph
         hunter = lph.PersistenceHunter(source_path)
         hunter.hunt(verbose=False)
 
@@ -878,7 +888,7 @@ def run_security_analyzer(source_path: str, output_dir: str, hostname: str) -> D
     
     try:
         # Import the module
-        import linux_security_analyzer as lsa
+        from lft.analyzers import security as lsa
         
         # Run the analyzer - it will use its own hostname from the handler
         analyzer = lsa.LinuxSecurityAnalyzer(source_path, output_dir)
@@ -927,7 +937,7 @@ def run_memory_analyzer(memory_path: str, output_dir: str, hostname: str,
     
     try:
         # Import the module
-        import linux_memory_analyzer as lma
+        from lft.analyzers import memory as lma
         
         # Check if Volatility is installed
         installed, msg = lma.check_volatility_installed()
@@ -971,9 +981,10 @@ def run_memory_analyzer(memory_path: str, output_dir: str, hostname: str,
                         with open(filepath, 'r') as f:
                             lines = sum(1 for _ in f) - 1  # Subtract header
                             result["finding_count"] += max(0, lines)
-                    except:
+                    except Exception:
+                        logger.debug("Could not count CSV rows for %s: skipping", filepath)
                         pass
-        
+
         result["success"] = True
         
     except ImportError:
@@ -996,7 +1007,7 @@ def run_package_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         "error": None,
     }
     try:
-        import linux_package_analyzer as lpa
+        from lft.analyzers import packages as lpa
         analyzer = lpa.PackageAnalyzer(source_path)
         analyzer.analyze(verbose=False)
         if analyzer.events:
@@ -1028,7 +1039,7 @@ def run_network_analyzer(source_path: str, output_dir: str, hostname: str) -> Di
         "error": None,
     }
     try:
-        import linux_network_analyzer as lna
+        from lft.analyzers import network as lna
         analyzer = lna.NetworkAnalyzer(source_path)
         analyzer.analyze(verbose=False)
         if analyzer.findings:
@@ -1263,9 +1274,9 @@ def run_filesystem_timeline(source_path: str, output_dir: str, hostname: str) ->
     }
 
     try:
-        import linux_filesystem_timeline as lft
+        from lft.analyzers import filesystem as lft_fs
 
-        gen = lft.FilesystemTimelineGenerator(source_path)
+        gen = lft_fs.FilesystemTimelineGenerator(source_path)
         try:
             gen.generate(verbose=False)
 
@@ -1301,7 +1312,9 @@ def run_filesystem_timeline(source_path: str, output_dir: str, hostname: str) ->
 # ============================================================================
 
 def run_log_gap_detection(output_dir: str, hostname: str,
-                           gap_threshold_hours: float = 6.0) -> Dict:
+                           gap_threshold_hours: float = 6.0,
+                           gap_severity_high_hours: float = 48.0,
+                           gap_severity_medium_hours: float = 12.0) -> Dict:
     """
     Identify suspicious time-gaps in the login/auth event timeline.
 
@@ -1368,7 +1381,9 @@ def run_log_gap_detection(output_dir: str, hostname: str,
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
                 for start, end, hours in gaps:
-                    sev = 'HIGH' if hours >= 48 else ('MEDIUM' if hours >= 12 else 'LOW')
+                    sev = ('HIGH' if hours >= gap_severity_high_hours
+                           else ('MEDIUM' if hours >= gap_severity_medium_hours
+                                 else 'LOW'))
                     writer.writerow({
                         'Gap_Start_UTC':       start.strftime('%Y-%m-%d %H:%M:%S'),
                         'Gap_End_UTC':         end.strftime('%Y-%m-%d %H:%M:%S'),
@@ -1407,7 +1422,7 @@ def run_string_analyzer(source_path: str, output_dir: str, hostname: str) -> Dic
     }
 
     try:
-        import linux_string_analyzer as lsa_str
+        from lft.analyzers import strings as lsa_str
 
         analyzer = lsa_str.StringAnalyzer(source_path)
         try:
@@ -1444,7 +1459,7 @@ def run_misc_artifacts(source_path: str, output_dir: str, hostname: str) -> Dict
     }
 
     try:
-        import linux_misc_artifacts as lma_misc
+        from lft.analyzers import misc as lma_misc
 
         collector = lma_misc.MiscArtifactsCollector(source_path)
         try:
@@ -1486,9 +1501,10 @@ def run_ioc_scanner(source_path: str, output_dir: str, hostname: str,
         return result
 
     try:
-        import linux_ioc_scanner as lis
+        from lft.analyzers import ioc as lis
 
-        scanner = lis.IOCScanner(source_path, ioc_file)
+        _max_fs = _active_config.ioc_max_file_size if _active_config else None
+        scanner = lis.IOCScanner(source_path, ioc_file, max_file_size=_max_fs)
         try:
             total = scanner.scan(verbose=False)
 
@@ -1707,7 +1723,8 @@ def create_summary_report(output_dir: str, hostname: str, results: List[Dict],
             try:
                 size = os.path.getsize(filepath)
                 size_str = f"{size:,} bytes"
-            except:
+            except Exception:
+                logger.debug("Could not get file size for %s", filepath)
                 size_str = "unknown size"
             f.write(f"  {basename} ({size_str})\n")
 
@@ -1900,27 +1917,15 @@ def prompt_for_bodyfile(quiet: bool = False) -> Optional[str]:
     except ImportError:
         pass  # Windows – proceed without tab completion
 
-    print(
-        f"\n{Style.INFO}Bodyfile (Sleuth Kit MAC timeline):{Style.RESET}",
-        file=sys.stderr,
-    )
-    print(
-        f"{Style.DIM}  Provide an existing bodyfile to use for filesystem timeline analysis.{Style.RESET}",
-        file=sys.stderr,
-    )
-    print(
-        f"{Style.DIM}  Format: MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime{Style.RESET}",
-        file=sys.stderr,
-    )
-    print(
-        f"{Style.DIM}  Press Enter to auto-detect from the UAC collection (or skip if absent).{Style.RESET}",
-        file=sys.stderr,
-    )
+    logger.info("Bodyfile (Sleuth Kit MAC timeline):")
+    logger.debug("  Provide an existing bodyfile to use for filesystem timeline analysis.")
+    logger.debug("  Format: MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime")
+    logger.debug("  Press Enter to auto-detect from the UAC collection (or skip if absent).")
 
     try:
         answer = input("  Bodyfile path [Enter to auto-detect]: ").strip()
     except (EOFError, KeyboardInterrupt):
-        print("", file=sys.stderr)
+        logger.info("")
         return None
 
     if not answer:
@@ -1930,11 +1935,8 @@ def prompt_for_bodyfile(quiet: bool = False) -> Optional[str]:
     abs_path = os.path.abspath(expanded)
 
     if not os.path.isfile(abs_path):
-        print(
-            f"{Style.WARNING}  Warning: bodyfile not found: {abs_path}. "
-            f"Will attempt auto-detection instead.{Style.RESET}",
-            file=sys.stderr,
-        )
+        logger.warning("  Warning: bodyfile not found: %s. "
+                        "Will attempt auto-detection instead.", abs_path)
         return None
 
     return abs_path
@@ -2283,7 +2285,10 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 verbose: bool = True, memory_path: str = None,
                 symbol_dirs: List[str] = None, quick_memory: bool = False,
                 bodyfile_path: str = None,
-                ioc_path: str = None) -> Tuple[str, List[Dict]]:
+                ioc_path: str = None,
+                config: 'ToolkitConfig' = None,
+                progress_callback=None,
+                cancel_event: 'threading.Event' = None) -> Tuple[str, List[Dict]]:
     """
     Run all analyzers on the source and output to a unified directory.
 
@@ -2300,20 +2305,30 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             analysis and auto-detection is skipped.  When None, the
             function will attempt to locate a bodyfile inside the UAC
             source automatically.
-
         ioc_path: Optional path to IOC file for scanning and CSV cross-reference
+        config: Optional ToolkitConfig for per-analyzer settings. When None,
+            default_config() is used (matching all current hardcoded behavior).
+        progress_callback: Optional callable(name, result, current, total) invoked
+            after each analyzer finishes.  Used by the GUI for live progress.
 
     Returns:
         Tuple of (output_directory, results_list)
     """
-    Style.enable_windows_ansi()
+    if config is None:
+        config = default_config()
+
+    # Store config so wrapper functions can access per-analyzer settings
+    # without changing the (source_path, output_dir, hostname) call signature.
+    global _active_config
+    _active_config = config
+
     start_time = datetime.now(tz=timezone.utc).replace(tzinfo=None)
     
     # Resolve source path
     source_path = os.path.abspath(source_path)
     
     if not os.path.exists(source_path):
-        raise FileNotFoundError(f"Source not found: {source_path}")
+        raise SourceNotFoundError(f"Source not found: {source_path}")
     
     # Determine source type
     is_tarball = any(source_path.lower().endswith(ext) for ext in TARBALL_EXTENSIONS)
@@ -2326,44 +2341,45 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         if tarballs_found and not is_extracted:
             # Directory contains tarballs - run batch analysis
             if verbose:
-                print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-                print(f"{Style.HEADER}{Style.BOLD}  Linux Unified Security Analyzer v{__version__}{Style.RESET}", file=sys.stderr)
-                print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-                print(f"\n{Style.INFO}Found {len(tarballs_found)} tarball(s) in directory:{Style.RESET}", file=sys.stderr)
+                logger.info("=" * 70)
+                logger.info("  Linux Unified Security Analyzer v%s", __version__)
+                logger.info("=" * 70)
+                logger.info("Found %d tarball(s) in directory:", len(tarballs_found))
                 for tb in tarballs_found:
-                    print(f"  - {os.path.basename(tb)}", file=sys.stderr)
+                    logger.info("  - %s", os.path.basename(tb))
             
             # Process each tarball
             all_results = []
             output_dirs = []
             for tarball in tarballs_found:
                 if verbose:
-                    print(f"\n{Style.HEADER}{'='*50}{Style.RESET}", file=sys.stderr)
-                    print(f"{Style.INFO}Processing:{Style.RESET} {os.path.basename(tarball)}", file=sys.stderr)
+                    logger.info("=" * 50)
+                    logger.info("Processing: %s", os.path.basename(tarball))
                 
                 out_dir, results = run_analysis(
                     tarball, output_base, parallel, verbose,
                     memory_path, symbol_dirs, quick_memory,
                     bodyfile_path=None,  # auto-detect per tarball in batch mode
                     ioc_path=ioc_path,
+                    config=config,
                 )
                 output_dirs.append(out_dir)
                 all_results.extend(results)
             
             if verbose:
-                print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-                print(f"{Style.SUCCESS}Batch analysis complete!{Style.RESET}", file=sys.stderr)
-                print(f"{Style.INFO}Processed {len(tarballs_found)} tarball(s){Style.RESET}", file=sys.stderr)
+                logger.info("=" * 70)
+                logger.log(25, "Batch analysis complete!")
+                logger.info("Processed %d tarball(s)", len(tarballs_found))
                 for out_dir in output_dirs:
-                    print(f"  - {out_dir}", file=sys.stderr)
+                    logger.info("  - %s", out_dir)
             
             return output_dirs[0] if len(output_dirs) == 1 else output_base, all_results
         
         elif tarballs_found and is_extracted:
             # Has both tarballs and extracted content - warn user
+            logger.warning("Warning: Directory contains both tarballs and extracted UAC content.")
             if verbose:
-                print(f"\n{Style.WARNING}Warning: Directory contains both tarballs and extracted UAC content.{Style.RESET}", file=sys.stderr)
-                print(f"{Style.INFO}Analyzing as extracted directory. To analyze tarballs, specify them directly.{Style.RESET}", file=sys.stderr)
+                logger.info("Analyzing as extracted directory. To analyze tarballs, specify them directly.")
     
     # Extract hostname
     if is_tarball:
@@ -2372,12 +2388,12 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         hostname = extract_hostname_from_directory(source_path)
     
     if verbose:
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}  Linux Unified Security Analyzer v{__version__}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        print(f"\n{Style.INFO}Source:{Style.RESET} {source_path}", file=sys.stderr)
-        print(f"{Style.INFO}Hostname:{Style.RESET} {hostname}", file=sys.stderr)
-        print(f"{Style.INFO}Mode:{Style.RESET} {'Tarball' if is_tarball else 'Directory'}", file=sys.stderr)
+        logger.info("=" * 70)
+        logger.info("  Linux Unified Security Analyzer v%s", __version__)
+        logger.info("=" * 70)
+        logger.info("Source: %s", source_path)
+        logger.info("Hostname: %s", hostname)
+        logger.info("Mode: %s", "Tarball" if is_tarball else "Directory")
 
     # Create output directory: [hostname]_analysis
     output_base = output_base or os.getcwd()
@@ -2385,7 +2401,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     os.makedirs(output_dir, exist_ok=True)
 
     if verbose:
-        print(f"{Style.INFO}Output Directory:{Style.RESET} {output_dir}", file=sys.stderr)
+        logger.info("Output Directory: %s", output_dir)
 
     # ---- Forensic audit log ---------------------------------------------- #
     audit_log_path = os.path.join(output_dir, f"{hostname}_audit.log")
@@ -2399,27 +2415,18 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     if bodyfile_path and os.path.isfile(bodyfile_path):
         # Caller supplied an explicit bodyfile – use it directly.
         if verbose:
-            print(
-                f"{Style.INFO}Bodyfile:{Style.RESET} {bodyfile_path} (user-supplied)",
-                file=sys.stderr,
-            )
+            logger.info("Bodyfile: %s (user-supplied)", bodyfile_path)
     else:
         # Try to locate a bodyfile inside the UAC collection.
         detected, bodyfile_is_temp = find_bodyfile_in_source(source_path)
         if detected:
             bodyfile_path = detected
             if verbose:
-                print(
-                    f"{Style.INFO}Bodyfile:{Style.RESET} auto-detected in UAC collection",
-                    file=sys.stderr,
-                )
+                logger.info("Bodyfile: auto-detected in UAC collection")
         else:
             bodyfile_path = None
             if verbose:
-                print(
-                    f"{Style.DIM}Bodyfile: none found – MAC timeline will be skipped{Style.RESET}",
-                    file=sys.stderr,
-                )
+                logger.debug("Bodyfile: none found – MAC timeline will be skipped")
 
     # Write audit log preamble (now that all options are resolved)
     audit.write_preamble(
@@ -2428,18 +2435,28 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         memory_path=memory_path, parallel=parallel,
     )
 
-    # Define analyzers to run
-    analyzers = [
-        ("Login Timeline",   run_login_timeline),
-        ("Journal Analyzer", run_journal_analyzer),
-        ("Persistence Hunter", run_persistence_hunter),
-        ("Security Analyzer",  run_security_analyzer),
-        ("Package Analyzer",   run_package_analyzer),
-        ("Network Analyzer",   run_network_analyzer),
-        ("Filesystem Timeline", run_filesystem_timeline),
-        ("String Analyzer", run_string_analyzer),
-        ("Misc Artifacts", run_misc_artifacts),
+    # Define analyzers to run — (display_name, config_key, function)
+    _all_analyzers = [
+        ("Login Timeline",     "login_timeline",     run_login_timeline),
+        ("Journal Analyzer",   "journal",            run_journal_analyzer),
+        ("Persistence Hunter", "persistence",        run_persistence_hunter),
+        ("Security Analyzer",  "security",           run_security_analyzer),
+        ("Package Analyzer",   "packages",           run_package_analyzer),
+        ("Network Analyzer",   "network",            run_network_analyzer),
+        ("Filesystem Timeline","filesystem_timeline", run_filesystem_timeline),
+        ("String Analyzer",    "string_analyzer",    run_string_analyzer),
+        ("Misc Artifacts",     "misc_artifacts",     run_misc_artifacts),
     ]
+
+    # Filter by config-enabled analyzers
+    analyzers = [
+        (name, func)
+        for name, key, func in _all_analyzers
+        if config.analyzers_enabled.get(key, True)
+    ]
+    if verbose and len(analyzers) < len(_all_analyzers):
+        skipped = [n for n, k, _ in _all_analyzers if not config.analyzers_enabled.get(k, True)]
+        logger.info("Skipped (disabled in config): %s", ", ".join(skipped))
 
     # Prepend bodyfile analyzer when a bodyfile is available.
     if bodyfile_path and os.path.isfile(bodyfile_path):
@@ -2456,9 +2473,11 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     for name, _func in analyzers:
         audit.write_analyzer_start(name)
 
+    _cancelled = lambda: cancel_event and cancel_event.is_set()
+
     if parallel:
         if verbose:
-            print(f"\n{Style.INFO}Running {len(analyzers)} analyzers in parallel...{Style.RESET}", file=sys.stderr)
+            logger.info("Running %d analyzers in parallel...", len(analyzers))
 
         with ThreadPoolExecutor(max_workers=len(analyzers)) as executor:
             futures = {}
@@ -2470,20 +2489,29 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 name = futures[future]
                 try:
                     result = future.result()
+                    if result is None:
+                        result = {"name": name, "success": False,
+                                  "output_files": [],
+                                  "error": f"{name} returned None"}
                     results.append(result)
                     audit.write_analyzer_result(name, result)
 
+                    if progress_callback:
+                        progress_callback(name, result, len(results), len(analyzers))
+
                     if verbose:
-                        status = Style.SUCCESS + "✓" if result["success"] else Style.ERROR + "✗"
                         counts = []
                         if result.get("event_count"):
                             counts.append(f"{result['event_count']} events")
                         if result.get("finding_count"):
                             counts.append(f"{result['finding_count']} findings")
-                        count_str = f" ({', '.join(counts)})" if counts else ""
-                        print(f"  {status} {name}{count_str}{Style.RESET}", file=sys.stderr)
+                        count_str = " (%s)" % ", ".join(counts) if counts else ""
+                        if result["success"]:
+                            logger.log(25, "  ✓ %s%s", name, count_str)
+                        else:
+                            logger.error("  ✗ %s%s", name, count_str)
                         if not result["success"] and result.get("error"):
-                            print(f"       {Style.DIM}{result['error']}{Style.RESET}", file=sys.stderr)
+                            logger.debug("       %s", result["error"])
 
                 except Exception as e:
                     err_result = {
@@ -2494,17 +2522,36 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                     }
                     results.append(err_result)
                     audit.write_analyzer_result(name, err_result)
-                    if verbose:
-                        print(f"  {Style.ERROR}✗ {name}: {e}{Style.RESET}", file=sys.stderr)
+                    if progress_callback:
+                        progress_callback(name, err_result, len(results), len(analyzers))
+                    logger.error("  ✗ %s: %s", name, e)
+
+                if _cancelled():
+                    # Cancel remaining futures and stop collecting
+                    for f in futures:
+                        f.cancel()
+                    logger.warning("Analysis cancelled by user.")
+                    break
     else:
         for name, func in analyzers:
+            if _cancelled():
+                logger.warning("Analysis cancelled by user.")
+                break
+
             if verbose:
-                print(f"\n{Style.INFO}Running {name}...{Style.RESET}", file=sys.stderr)
+                logger.info("Running %s...", name)
 
             try:
                 result = func(source_path, output_dir, hostname)
+                if result is None:
+                    result = {"name": name, "success": False,
+                              "output_files": [],
+                              "error": f"{name} returned None"}
                 results.append(result)
                 audit.write_analyzer_result(name, result)
+
+                if progress_callback:
+                    progress_callback(name, result, len(results), len(analyzers))
 
                 if verbose:
                     if result["success"]:
@@ -2513,10 +2560,10 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                             counts.append(f"{result['event_count']} events")
                         if result.get("finding_count"):
                             counts.append(f"{result['finding_count']} findings")
-                        count_str = f": {', '.join(counts)}" if counts else ""
-                        print(f"  {Style.SUCCESS}✓ Complete{count_str}{Style.RESET}", file=sys.stderr)
+                        count_str = ": %s" % ", ".join(counts) if counts else ""
+                        logger.log(25, "  ✓ Complete%s", count_str)
                     elif result.get("error"):
-                        print(f"  {Style.ERROR}✗ Failed: {result['error']}{Style.RESET}", file=sys.stderr)
+                        logger.error("  ✗ Failed: %s", result["error"])
 
             except Exception as e:
                 err_result = {
@@ -2527,17 +2574,20 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 }
                 results.append(err_result)
                 audit.write_analyzer_result(name, err_result)
-                if verbose:
-                    print(f"  {Style.ERROR}✗ Error: {e}{Style.RESET}", file=sys.stderr)
-    
+                if progress_callback:
+                    progress_callback(name, err_result, len(results), len(analyzers))
+                logger.error("  ✗ Error: %s", e)
+
     # Run memory analyzer if memory path provided
+    if _cancelled():
+        return output_dir, results
     if memory_path and os.path.exists(memory_path):
         audit.write_analyzer_start("Memory Analyzer")
         if verbose:
-            print(f"\n{Style.INFO}Running Memory Analyzer...{Style.RESET}", file=sys.stderr)
-            print(f"  {Style.DIM}Image: {memory_path}{Style.RESET}", file=sys.stderr)
+            logger.info("Running Memory Analyzer...")
+            logger.debug("  Image: %s", memory_path)
             if symbol_dirs:
-                print(f"  {Style.DIM}Symbols: {', '.join(symbol_dirs)}{Style.RESET}", file=sys.stderr)
+                logger.debug("  Symbols: %s", ", ".join(symbol_dirs))
         
         try:
             mem_result = run_memory_analyzer(
@@ -2552,10 +2602,10 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             
             if verbose:
                 if mem_result["success"]:
-                    count_str = f" ({mem_result['finding_count']} entries)" if mem_result.get('finding_count') else ""
-                    print(f"  {Style.SUCCESS}[OK] Memory Analyzer{count_str}{Style.RESET}", file=sys.stderr)
+                    count_str = " (%d entries)" % mem_result["finding_count"] if mem_result.get("finding_count") else ""
+                    logger.log(25, "  [OK] Memory Analyzer%s", count_str)
                 else:
-                    print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {mem_result.get('error', 'Unknown error')}{Style.RESET}", file=sys.stderr)
+                    logger.error("  [FAILED] Memory Analyzer: %s", mem_result.get("error", "Unknown error"))
         except Exception as e:
             results.append({
                 "name": "Memory Analyzer",
@@ -2563,27 +2613,30 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
                 "output_files": [],
                 "error": str(e)
             })
-            if verbose:
-                print(f"  {Style.ERROR}[FAILED] Memory Analyzer: {e}{Style.RESET}", file=sys.stderr)
-    
+            logger.error("  [FAILED] Memory Analyzer: %s", e)
+
     # ---- Post-processing: log gap detection --------------------------------- #
+    if _cancelled():
+        return output_dir, results
     audit.write_analyzer_start("Log Gap Detection")
     if verbose:
-        print(f"\n{Style.INFO}Running log gap detection...{Style.RESET}", file=sys.stderr)
+        logger.info("Running log gap detection...")
     try:
-        gap_result = run_log_gap_detection(output_dir, hostname)
+        gap_result = run_log_gap_detection(
+            output_dir, hostname,
+            gap_threshold_hours=config.gap_threshold_hours,
+            gap_severity_high_hours=config.gap_severity_high_hours,
+            gap_severity_medium_hours=config.gap_severity_medium_hours,
+        )
         results.append(gap_result)
         audit.write_analyzer_result("Log Gap Detection", gap_result)
         if verbose:
             if gap_result["finding_count"]:
-                print(
-                    f"  {Style.WARNING}⚠ {gap_result['finding_count']} "
-                    f"gap(s) ≥ 6 h in auth timeline{Style.RESET}",
-                    file=sys.stderr,
-                )
+                logger.warning("  ⚠ %d gap(s) ≥ %.0f h in auth timeline",
+                               gap_result["finding_count"],
+                               config.gap_threshold_hours)
             else:
-                print(f"  {Style.SUCCESS}✓ No significant log gaps{Style.RESET}",
-                      file=sys.stderr)
+                logger.log(25, "  ✓ No significant log gaps")
     except Exception as exc:
         results.append({"name": "Log Gap Detection", "success": False,
                         "output_files": [], "error": str(exc)})
@@ -2592,35 +2645,30 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
     if ioc_path and os.path.isfile(ioc_path):
         audit.write_analyzer_start("IOC Matcher")
         if verbose:
-            print(f"\n{Style.INFO}Running IOC matching...{Style.RESET}",
-                  file=sys.stderr)
-            print(f"  {Style.DIM}IOC file: {ioc_path}{Style.RESET}", file=sys.stderr)
+            logger.info("Running IOC matching...")
+            logger.debug("  IOC file: %s", ioc_path)
         try:
             ioc_result = run_ioc_matcher(output_dir, hostname, ioc_path)
             results.append(ioc_result)
             audit.write_analyzer_result("IOC Matcher", ioc_result)
             if verbose:
                 if ioc_result["finding_count"]:
-                    print(
-                        f"  {Style.CRITICAL}!! {ioc_result['finding_count']} "
-                        f"IOC hit(s) found{Style.RESET}",
-                        file=sys.stderr,
-                    )
+                    logger.error("  !! %d IOC hit(s) found",
+                                 ioc_result["finding_count"])
                 else:
-                    print(
-                        f"  {Style.SUCCESS}✓ No IOC matches{Style.RESET}",
-                        file=sys.stderr,
-                    )
+                    logger.log(25, "  ✓ No IOC matches")
         except Exception as exc:
             results.append({"name": "IOC Matcher", "success": False,
                             "output_files": [], "error": str(exc)})
 
     # Run IOC scanner if IOC file provided (runs last to also scan analysis output)
+    if _cancelled():
+        return output_dir, results
     if ioc_path:
         audit.write_analyzer_start("IOC Scanner")
         if verbose:
-            print(f"\n{Style.INFO}Running IOC Scanner...{Style.RESET}", file=sys.stderr)
-            print(f"  {Style.DIM}IOC File: {ioc_path}{Style.RESET}", file=sys.stderr)
+            logger.info("Running IOC Scanner...")
+            logger.debug("  IOC File: %s", ioc_path)
 
         try:
             ioc_result = run_ioc_scanner(
@@ -2634,10 +2682,10 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
 
             if verbose:
                 if ioc_result["success"]:
-                    count_str = f" ({ioc_result['finding_count']} matches)" if ioc_result.get('finding_count') else ""
-                    print(f"  {Style.SUCCESS}[OK] IOC Scanner{count_str}{Style.RESET}", file=sys.stderr)
+                    count_str = " (%d matches)" % ioc_result["finding_count"] if ioc_result.get("finding_count") else ""
+                    logger.log(25, "  [OK] IOC Scanner%s", count_str)
                 else:
-                    print(f"  {Style.ERROR}[FAILED] IOC Scanner: {ioc_result.get('error', 'Unknown error')}{Style.RESET}", file=sys.stderr)
+                    logger.error("  [FAILED] IOC Scanner: %s", ioc_result.get("error", "Unknown error"))
         except Exception as e:
             err_result = {
                 "name": "IOC Scanner",
@@ -2647,8 +2695,7 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             }
             results.append(err_result)
             audit.write_analyzer_result("IOC Scanner", err_result)
-            if verbose:
-                print(f"  {Style.ERROR}[FAILED] IOC Scanner: {e}{Style.RESET}", file=sys.stderr)
+            logger.error("  [FAILED] IOC Scanner: %s", e)
 
     # Write the final audit log summary and close the log file
     audit.write_summary(results)
@@ -2665,17 +2712,14 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
             1 for r in results for e in r.get("coverage", [])
             if e.get("status") == "NOT_FOUND"
         )
-        print(
-            f"\n{Style.INFO}Coverage Manifest:{Style.RESET} "
-            f"{cov_found} artifacts found, {cov_missing} not found",
-            file=sys.stderr,
-        )
+        logger.info("Coverage Manifest: %d artifacts found, %d not found",
+                    cov_found, cov_missing)
 
     end_time = datetime.now(tz=timezone.utc).replace(tzinfo=None)
 
     # Create summary report
     if verbose:
-        print(f"\n{Style.INFO}Creating summary report...{Style.RESET}", file=sys.stderr)
+        logger.info("Creating summary report...")
     
     summary_file = create_summary_report(
         output_dir, hostname, results, start_time, end_time,
@@ -2690,30 +2734,31 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
         total_findings = sum(r.get("finding_count", 0) for r in results)
         successful = sum(1 for r in results if r["success"])
         
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}  Analysis Complete{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        print(f"\n{Style.INFO}Duration:{Style.RESET} {duration:.2f} seconds", file=sys.stderr)
-        print(f"{Style.INFO}Analyzers:{Style.RESET} {successful}/{len(results)} successful", file=sys.stderr)
-        print(f"{Style.INFO}Total Events:{Style.RESET} {total_events}", file=sys.stderr)
-        print(f"{Style.INFO}Total Findings:{Style.RESET} {total_findings}", file=sys.stderr)
-        print(f"\n{Style.SUCCESS}Output Directory:{Style.RESET} {output_dir}", file=sys.stderr)
-        
+        logger.info("=" * 70)
+        logger.info("  Analysis Complete")
+        logger.info("=" * 70)
+        logger.info("Duration: %.2f seconds", duration)
+        logger.info("Analyzers: %d/%d successful", successful, len(results))
+        logger.info("Total Events: %d", total_events)
+        logger.info("Total Findings: %d", total_findings)
+        logger.log(25, "Output Directory: %s", output_dir)
+
         # List output files
-        print(f"\n{Style.INFO}Generated Files:{Style.RESET}", file=sys.stderr)
+        logger.info("Generated Files:")
         for filename in sorted(os.listdir(output_dir)):
             filepath = os.path.join(output_dir, filename)
             try:
                 size = os.path.getsize(filepath)
                 if size > 1024 * 1024:
-                    size_str = f"{size / (1024*1024):.1f} MB"
+                    size_str = "%.1f MB" % (size / (1024 * 1024))
                 elif size > 1024:
-                    size_str = f"{size / 1024:.1f} KB"
+                    size_str = "%.1f KB" % (size / 1024)
                 else:
-                    size_str = f"{size} bytes"
-            except:
+                    size_str = "%d bytes" % size
+            except Exception:
+                logger.debug("Could not format file size for %s", filepath)
                 size_str = ""
-            print(f"  • {filename} ({size_str})", file=sys.stderr)
+            logger.info("  • %s (%s)", filename, size_str)
 
     # Clean up any temporary bodyfile extracted from the tarball
     if bodyfile_is_temp and bodyfile_path and os.path.isfile(bodyfile_path):
@@ -2730,8 +2775,6 @@ def run_analysis(source_path: str, output_base: str = None, parallel: bool = Tru
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
-    
     parser = argparse.ArgumentParser(
         description="Linux Unified Security Analyzer - Run all forensic tools together",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2844,7 +2887,7 @@ Output:
     
     parser.add_argument(
         '-s', '--source',
-        required=True,
+        default=None,
         help='Source: UAC tarball (.tar.gz) or extracted directory'
     )
     
@@ -2912,6 +2955,26 @@ Output:
         )
     )
 
+    # Configuration file options
+    parser.add_argument(
+        '--config',
+        default=None,
+        metavar='PATH',
+        help='Path to a JSON configuration file (overrides defaults; CLI flags override config)'
+    )
+
+    parser.add_argument(
+        '--dump-config',
+        action='store_true',
+        help='Print default configuration as JSON to stdout and exit'
+    )
+
+    parser.add_argument(
+        '--gui',
+        action='store_true',
+        help='Launch the graphical interface instead of the CLI'
+    )
+
     parser.add_argument(
         '-v', '--version',
         action='version',
@@ -2920,86 +2983,102 @@ Output:
 
     args = parser.parse_args()
 
+    # Handle --gui before anything else
+    if args.gui:
+        from lft.gui import main as gui_main
+        gui_main()
+        return
+
+    # Handle --dump-config before anything else
+    if args.dump_config:
+        import json as _json
+        from dataclasses import asdict as _asdict
+        cfg_data = _asdict(default_config())
+        ordered = {"_comment": "Linux Forensics Toolkit configuration — edit values below"}
+        ordered.update(cfg_data)
+        print(_json.dumps(ordered, indent=4))
+        sys.exit(0)
+
+    # --source is required for normal runs (but not for --dump-config)
+    if not args.source:
+        parser.error("the following arguments are required: -s/--source")
+
+    # Build config: defaults -> config file -> CLI args
+    cfg = default_config()
+    if args.config:
+        cfg = load_config(args.config)
+    cfg = merge_cli_args(cfg, args)
+
+    setup_logging(quiet=cfg.quiet)
+
     # Resolve paths
     source_path = os.path.abspath(args.source)
-    output_base = os.path.abspath(args.output)
+    output_base = os.path.abspath(cfg.output_base)
 
     if not os.path.exists(source_path):
-        print(f"{Style.ERROR}Error: Source not found: {source_path}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.DIM}  Expected: UAC tarball (.tar.gz, .tgz, .tar.bz2, .tar.xz),{Style.RESET}", file=sys.stderr)
-        print(f"{Style.DIM}  extracted UAC directory, or directory containing tarballs.{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Source not found: %s", source_path)
+        logger.debug("  Expected: UAC tarball (.tar.gz, .tgz, .tar.bz2, .tar.xz),")
+        logger.debug("  extracted UAC directory, or directory containing tarballs.")
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
-    # Resolve memory path if provided
-    memory_path = os.path.abspath(args.memory) if args.memory else None
+    # Resolve memory path if provided (CLI or config)
+    memory_path = None
+    if cfg.memory_image:
+        memory_path = os.path.abspath(cfg.memory_image)
     if memory_path and not os.path.exists(memory_path):
-        print(f"{Style.ERROR}Error: Memory image not found: {memory_path}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.DIM}  Expected: .lime, .raw, .vmem, or other memory dump format.{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Memory image not found: %s", memory_path)
+        logger.debug("  Expected: .lime, .raw, .vmem, or other memory dump format.")
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     # Resolve bodyfile path
-    # Priority: --bodyfile flag > interactive prompt > auto-detection inside run_analysis()
+    # Priority: --bodyfile / config > interactive prompt > auto-detection inside run_analysis()
     bodyfile_path: Optional[str] = None
-    if args.bodyfile:
-        bp = os.path.abspath(os.path.expanduser(args.bodyfile))
+    if cfg.bodyfile:
+        bp = os.path.abspath(os.path.expanduser(cfg.bodyfile))
         if not os.path.isfile(bp):
-            print(
-                f"{Style.ERROR}Error: Bodyfile not found: {bp}{Style.RESET}",
-                file=sys.stderr,
-            )
-            print(
-                f"{Style.DIM}  Expected: Sleuth Kit bodyfile (MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime).{Style.RESET}",
-                file=sys.stderr,
-            )
-            print(
-                f"{Style.DIM}  Generate with: fls -r -m / /dev/sdX > bodyfile.txt{Style.RESET}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            logger.error("Error: Bodyfile not found: %s", bp)
+            logger.debug("  Expected: Sleuth Kit bodyfile (MD5|name|inode|mode|UID|GID|size|atime|mtime|ctime|crtime).")
+            logger.debug("  Generate with: fls -r -m / /dev/sdX > bodyfile.txt")
+            sys.exit(EXIT_SOURCE_NOT_FOUND)
         bodyfile_path = bp
     else:
         # Interactively prompt the analyst (skipped when --quiet or non-TTY)
-        bodyfile_path = prompt_for_bodyfile(quiet=args.quiet)
+        bodyfile_path = prompt_for_bodyfile(quiet=cfg.quiet)
 
-    # Resolve IOC path
+    # Resolve IOC path (CLI or config)
     ioc_path: Optional[str] = None
-    if args.ioc:
-        ioc_path = os.path.abspath(os.path.expanduser(args.ioc))
+    if cfg.ioc_file:
+        ioc_path = os.path.abspath(os.path.expanduser(cfg.ioc_file))
         if not os.path.isfile(ioc_path):
-            print(
-                f"{Style.ERROR}Error: IOC file not found: {ioc_path}{Style.RESET}",
-                file=sys.stderr,
-            )
-            print(
-                f"{Style.DIM}  Expected: Plain text, one IOC per line (IPs, domains, MD5/SHA256 hashes, paths).{Style.RESET}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            logger.error("Error: IOC file not found: %s", ioc_path)
+            logger.debug("  Expected: Plain text, one IOC per line (IPs, domains, MD5/SHA256 hashes, paths).")
+            sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     try:
         output_dir, results = run_analysis(
             source_path=source_path,
             output_base=output_base,
-            parallel=not args.sequential,
-            verbose=not args.quiet,
+            parallel=cfg.parallel,
+            verbose=not cfg.quiet,
             memory_path=memory_path,
-            symbol_dirs=args.symbols if args.symbols else None,
+            symbol_dirs=cfg.symbol_dirs if cfg.symbol_dirs else None,
             quick_memory=args.quick_memory,
             bodyfile_path=bodyfile_path,
             ioc_path=ioc_path,
+            config=cfg,
         )
         
         # Exit with error code if any analyzer failed completely
         failures = [r for r in results if not r["success"]]
         if failures:
-            sys.exit(1)
-        
+            sys.exit(EXIT_ERROR)
+
     except KeyboardInterrupt:
-        print(f"\n{Style.WARNING}Analysis interrupted{Style.RESET}", file=sys.stderr)
-        sys.exit(130)
+        logger.warning("Analysis interrupted")
+        sys.exit(EXIT_SIGINT)
     except Exception as e:
-        print(f"\n{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: %s", e)
+        sys.exit(EXIT_ERROR)
 
 
 if __name__ == "__main__":

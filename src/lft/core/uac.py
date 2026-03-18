@@ -14,15 +14,56 @@ Zero external dependencies (stdlib only).
 import gzip
 import hashlib
 import io
+import logging
 import os
 import re
 import shutil
-import sys
 import tarfile
 import tempfile
+import csv
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from lft.core.errors import SourceCorruptError
+
+logger = logging.getLogger(__name__)
+
 __version__ = "2.0.0"
+
+
+# ============================================================================
+# Unmatched Line Capture
+# ============================================================================
+
+class UnmatchedWriter:
+    """Collects log lines that fail regex parsing, exports as CSV.
+
+    Ensures nothing is invisible — every line that doesn't match a known
+    format is captured so analysts can review what was skipped.
+    """
+
+    def __init__(self):
+        self._lines: List[Tuple[str, int, str]] = []
+
+    def add(self, source_file: str, line_number: int, raw_line: str):
+        """Record a line that didn't match any expected pattern."""
+        self._lines.append((source_file, line_number, raw_line))
+
+    def export_csv(self, output_path: str) -> Optional[str]:
+        """Write unmatched lines to CSV.  Returns path or None if empty."""
+        if not self._lines:
+            return None
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["Source_File", "Line_Number", "Raw_Line"])
+            w.writeheader()
+            for src, num, raw in self._lines:
+                w.writerow({"Source_File": src, "Line_Number": num,
+                            "Raw_Line": raw[:2000]})
+        return output_path
+
+    @property
+    def count(self) -> int:
+        return len(self._lines)
 
 
 # ============================================================================
@@ -255,6 +296,9 @@ class UACHandler:
             return self._find_pattern_directory(patterns)
         return []
 
+    # Convenience alias — several analyzers use the shorter name.
+    find_files = find_files_by_pattern
+
     def list_directory(self, dirpath: str) -> List[str]:
         """List immediate children of a directory."""
         dirpath = dirpath.rstrip('/')
@@ -379,10 +423,7 @@ class UACHandler:
         except KeyError:
             pass
         except Exception as e:
-            if self.verbose:
-                from lft_style import Style
-                print(f"{Style.WARNING}Warning: Could not extract {member_path}: {e}{Style.RESET}",
-                      file=sys.stderr)
+            logger.warning("Could not extract %s: %s", member_path, e)
         return None
 
     def extract_file_to_temp(self, member_path: str) -> Optional[str]:
@@ -404,15 +445,9 @@ class UACHandler:
             member = self.tar.getmember(member_path)
             return safe_extract_member(self.tar, member, self._temp_dir)
         except ValueError:
-            if self.verbose:
-                from lft_style import Style
-                print(f"{Style.ERROR}Security: Blocked path traversal: {member_path}{Style.RESET}",
-                      file=sys.stderr)
+            logger.error("Security: Blocked path traversal: %s", member_path)
         except (KeyError, tarfile.TarError, OSError) as e:
-            if self.verbose:
-                from lft_style import Style
-                print(f"{Style.WARNING}Warning: Could not extract {member_path}: {e}{Style.RESET}",
-                      file=sys.stderr)
+            logger.warning("Could not extract %s: %s", member_path, e)
         return None
 
     def get_file_handle(self, member_path: str, binary: bool = False) -> Optional[io.IOBase]:
@@ -463,9 +498,9 @@ class UACHandler:
                 self._member_dict = {m.name: m for m in self._members_cache}
                 self._detect_structure()
             except Exception as e:
-                raise RuntimeError(f"Failed to open tarball: {e}")
+                raise SourceCorruptError(f"Failed to open tarball: {e}") from e
         except Exception as e:
-            raise RuntimeError(f"Failed to open tarball: {e}")
+            raise SourceCorruptError(f"Failed to open tarball: {e}") from e
 
     def _detect_structure(self):
         """Detect the UAC directory structure, root prefix, and hostname."""
@@ -740,3 +775,96 @@ class UACHandler:
                 return f.read()
         except Exception:
             return None
+
+    # ------------------------------------------------------------------
+    # Raw file extraction (Layer 1 — complete forensic data dump)
+    # ------------------------------------------------------------------
+
+    RAW_EXPORT_CATEGORIES: Dict[str, List[str]] = {
+        "logs":        ["var/log/"],
+        "configs":     ["etc/"],
+        "network":     ["etc/hosts", "etc/resolv.conf", "etc/hosts.allow",
+                        "etc/hosts.deny", "etc/network/", "etc/netplan/",
+                        "etc/sysconfig/network-scripts/"],
+        "persistence": ["etc/cron", "var/spool/cron", "etc/systemd/",
+                        "etc/init.d/", "etc/rc", "etc/profile",
+                        "etc/bash", "etc/ld.so"],
+        "packages":    ["var/log/dpkg", "var/log/apt/", "var/log/yum",
+                        "var/log/dnf", "var/log/pacman",
+                        "etc/apt/sources", "etc/yum.repos.d/"],
+    }
+
+    def export_raw_files(self, output_base: str) -> Dict[str, List[str]]:
+        """Extract key forensic files to disk, organised by category.
+
+        Creates ``{output_base}/raw/{category}/{relative_path}`` for every
+        file that matches a category prefix.  Returns a dict mapping each
+        category name to the list of files extracted.
+        """
+        result: Dict[str, List[str]] = {cat: [] for cat in self.RAW_EXPORT_CATEGORIES}
+        raw_root = os.path.join(output_base, "raw")
+
+        if self.is_tarball and self.tar:
+            members = self._members_cache or self.tar.getmembers()
+            for member in members:
+                if not member.isfile():
+                    if member.issym() or member.islnk():
+                        logger.debug("raw export: skipping symlink %s", member.name)
+                    continue
+                rel = member.name
+                if self._root_prefix and rel.startswith(self._root_prefix):
+                    rel = rel[len(self._root_prefix):]
+                rel = rel.lstrip("/")
+
+                cat = self._categorise_path(rel)
+                if cat is None:
+                    continue
+
+                dest = os.path.join(raw_root, cat, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                try:
+                    src = self.tar.extractfile(member)
+                    if src is None:
+                        continue
+                    with open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    result[cat].append(dest)
+                except Exception as exc:
+                    logger.debug("raw export: failed to extract %s: %s",
+                                 member.name, exc)
+        else:
+            # Directory source
+            base = self.source_path
+            for dirpath, _dirs, files in os.walk(base):
+                for fname in files:
+                    full = os.path.join(dirpath, fname)
+                    rel = os.path.relpath(full, base).replace("\\", "/")
+                    # strip leading hostname dir if present
+                    if self._root_prefix:
+                        prefix = self._root_prefix.strip("/")
+                        if rel.startswith(prefix + "/"):
+                            rel = rel[len(prefix) + 1:]
+                    cat = self._categorise_path(rel)
+                    if cat is None:
+                        continue
+                    dest = os.path.join(raw_root, cat, rel)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    try:
+                        shutil.copy2(full, dest)
+                        result[cat].append(dest)
+                    except Exception as exc:
+                        logger.debug("raw export: failed to copy %s: %s",
+                                     full, exc)
+
+        total = sum(len(v) for v in result.values())
+        logger.info("Raw extraction: %d files across %d categories",
+                     total, sum(1 for v in result.values() if v))
+        return result
+
+    def _categorise_path(self, rel_path: str) -> Optional[str]:
+        """Return the first matching export category for *rel_path*, or None."""
+        for cat, prefixes in self.RAW_EXPORT_CATEGORIES.items():
+            for prefix in prefixes:
+                if rel_path.startswith(prefix):
+                    return cat
+        return None

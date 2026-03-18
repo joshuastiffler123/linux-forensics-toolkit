@@ -50,6 +50,7 @@ import csv
 import gzip
 import hashlib
 import io
+import logging
 import os
 import re
 import stat
@@ -64,9 +65,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 __version__ = "2.0.0"
 
+logger = logging.getLogger(__name__)
 
-from lft_style import Style
-from lft_uac import UACHandler, is_safe_path, calculate_hashes
+from lft.core.uac import UACHandler, UnmatchedWriter, is_safe_path, calculate_hashes
 
 
 # ============================================================================
@@ -383,6 +384,7 @@ class LinuxSecurityAnalyzer:
         
         self.findings: List[SecurityFinding] = []
         self.stats = defaultdict(int)
+        self.unmatched = UnmatchedWriter()
     
     def close(self):
         self.handler.close()
@@ -445,16 +447,14 @@ class LinuxSecurityAnalyzer:
     
     def analyze(self, verbose: bool = True) -> None:
         """Run all security checks."""
-        Style.enable_windows_ansi()
-        
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}  Linux Security Analyzer v{__version__}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Source:{Style.RESET} {self.source_path}", file=sys.stderr)
-            print(f"{Style.INFO}Hostname:{Style.RESET} {self.hostname}", file=sys.stderr)
-            print(f"{Style.INFO}Mode:{Style.RESET} {'Tarball' if self.handler.is_tarball else 'Directory'}", file=sys.stderr)
-        
+            logger.info("=" * 70)
+            logger.info("  Linux Security Analyzer v%s", __version__)
+            logger.info("=" * 70)
+            logger.info("Source: %s", self.source_path)
+            logger.info("Hostname: %s", self.hostname)
+            logger.info("Mode: %s", "Tarball" if self.handler.is_tarball else "Directory")
+
         checks = [
             ("Rootkit traces", self._check_rootkit_traces),
             ("Environment variables", self._check_environment),
@@ -478,21 +478,20 @@ class LinuxSecurityAnalyzer:
             ("Container escape", self._check_container_escape),
             ("Shadow file", self._check_shadow),
         ]
-        
+
         total = len(checks)
         for i, (name, check_func) in enumerate(checks, 1):
             if verbose:
-                print(f"\n{Style.INFO}[{i}/{total}] Checking {name}...{Style.RESET}", file=sys.stderr)
+                logger.info("[%d/%d] Checking %s...", i, total, name)
             try:
                 count = check_func()
-                if verbose and count > 0:
-                    print(f"  {Style.WARNING}Found {count} issues{Style.RESET}", file=sys.stderr)
+                if count > 0:
+                    logger.warning("  Found %d issues", count)
                 elif verbose:
-                    print(f"  {Style.SUCCESS}Clean{Style.RESET}", file=sys.stderr)
+                    logger.log(25, "  Clean")
             except Exception as e:
-                if verbose:
-                    print(f"  {Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
-        
+                logger.error("  Error: %s", e)
+
         if verbose:
             self._print_summary()
     
@@ -549,7 +548,8 @@ class LinuxSecurityAnalyzer:
                         filepath, content, ROOTKIT_INDICATORS,
                         "rootkit", "ROOTKIT_INDICATOR", "CRITICAL"
                     )
-                except:
+                except Exception:
+                    logger.debug("Could not check rootkit patterns in %s", filepath)
                     pass
         
         return count
@@ -587,14 +587,16 @@ class LinuxSecurityAnalyzer:
                 if not line or line.startswith('#'):
                     continue
                 
+                matched = False
                 match = re.match(r'^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$', line)
                 if match:
+                    matched = True
                     var_name, var_value = match.groups()
                     var_value = var_value.strip('"\'')
-                    
+
                     if var_name in SENSITIVE_ENV_VARS:
                         severity = SENSITIVE_ENV_VARS[var_name]
-                        
+
                         # Additional severity checks
                         if var_name == "LD_PRELOAD":
                             severity = "CRITICAL"
@@ -609,7 +611,7 @@ class LinuxSecurityAnalyzer:
                             continue  # Normal PATH without suspicious dirs
                         else:
                             description = f"Security-sensitive variable {var_name} set"
-                        
+
                         self._add_finding(
                             filepath=f"/{env_file}",
                             finding_type="ENV_VARIABLE",
@@ -620,9 +622,10 @@ class LinuxSecurityAnalyzer:
                             line_number=line_num
                         )
                         count += 1
-                
+
                 # Check for curl/wget piped to shell
                 if re.search(r'(curl|wget).*\|\s*(bash|sh|python|perl)', line, re.IGNORECASE):
+                    matched = True
                     self._add_finding(
                         filepath=f"/{env_file}",
                         finding_type="ENV_REMOTE_EXEC",
@@ -633,6 +636,10 @@ class LinuxSecurityAnalyzer:
                         line_number=line_num
                     )
                     count += 1
+
+                # Shell builtins and common directives are expected, not unmatched
+                if not matched and not re.match(r'^(if|fi|then|else|elif|for|do|done|case|esac|while|function|source|\.|\[|alias|umask|ulimit|shopt|set|unset|eval|return|exit)\b', line):
+                    self.unmatched.add(f"/{env_file}", line_num, line)
         
         return count
     
@@ -1078,12 +1085,17 @@ class LinuxSecurityAnalyzer:
         if data:
             content = data.decode('utf-8', errors='replace')
             for line_num, line in enumerate(content.split('\n'), 1):
-                parts = line.split(':')
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#'):
+                    continue
+                parts = line_stripped.split(':')
                 if len(parts) >= 7:
                     username, uid = parts[0], parts[2]
                     if uid == '0' and username != 'root':
-                        self._add_finding(filepath="/etc/passwd", finding_type="BACKDOOR_USER_UID0", technique_key="backdoor_user", severity="CRITICAL", description=f"Non-root user with UID=0: {username}", indicator=line, line_number=line_num)
+                        self._add_finding(filepath="/etc/passwd", finding_type="BACKDOOR_USER_UID0", technique_key="backdoor_user", severity="CRITICAL", description=f"Non-root user with UID=0: {username}", indicator=line_stripped, line_number=line_num)
                         count += 1
+                else:
+                    self.unmatched.add("/etc/passwd", line_num, line_stripped)
         return count
     
     def _check_shell_profiles(self) -> int:
@@ -1143,12 +1155,19 @@ class LinuxSecurityAnalyzer:
         data = self.handler.get_file("live_response/process/capabilities.txt")
         if data:
             content = data.decode('utf-8', errors='replace')
-            for line in content.split('\n'):
+            for line_num, line in enumerate(content.split('\n'), 1):
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                cap_matched = False
                 for cap in DANGEROUS_CAPABILITIES:
-                    if cap in line.lower():
-                        self._add_finding(filepath=line.split()[0] if line.split() else "unknown", finding_type="DANGEROUS_CAPABILITY", technique_key="capabilities", severity="HIGH", description=f"Dangerous capability: {cap}", indicator=line.strip())
+                    if cap in line_stripped.lower():
+                        cap_matched = True
+                        self._add_finding(filepath=line_stripped.split()[0] if line_stripped.split() else "unknown", finding_type="DANGEROUS_CAPABILITY", technique_key="capabilities", severity="HIGH", description=f"Dangerous capability: {cap}", indicator=line_stripped)
                         count += 1
                         break
+                if not cap_matched:
+                    self.unmatched.add("live_response/process/capabilities.txt", line_num, line_stripped)
         return count
     
     def _check_kernel_modules(self) -> int:
@@ -1291,7 +1310,8 @@ class LinuxSecurityAnalyzer:
                 try:
                     content = data.decode('utf-8', errors='replace')
                     count += self._check_patterns(f"/{filepath}", content, WEB_SHELL_PATTERNS, "web_shell", "WEB_SHELL", "CRITICAL")
-                except:
+                except Exception:
+                    logger.debug("Could not check web shell patterns in %s", filepath)
                     pass
         return count
     
@@ -1314,10 +1334,16 @@ class LinuxSecurityAnalyzer:
         if data:
             content = data.decode('utf-8', errors='replace')
             for line_num, line in enumerate(content.split('\n'), 1):
-                parts = line.split(':')
-                if len(parts) >= 2 and parts[1].startswith('$1$'):
-                    self._add_finding(filepath="/etc/shadow", finding_type="SHADOW_WEAK_HASH", technique_key="shadow_file", severity="MEDIUM", description=f"User {parts[0]} uses weak MD5 hash", indicator=f"{parts[0]}:$1$...", line_number=line_num)
-                    count += 1
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                parts = line_stripped.split(':')
+                if len(parts) >= 2:
+                    if parts[1].startswith('$1$'):
+                        self._add_finding(filepath="/etc/shadow", finding_type="SHADOW_WEAK_HASH", technique_key="shadow_file", severity="MEDIUM", description=f"User {parts[0]} uses weak MD5 hash", indicator=f"{parts[0]}:$1$...", line_number=line_num)
+                        count += 1
+                else:
+                    self.unmatched.add("/etc/shadow", line_num, line_stripped)
         return count
     
     # ========================================================================
@@ -1326,26 +1352,32 @@ class LinuxSecurityAnalyzer:
     
     def _print_summary(self) -> None:
         """Print analysis summary."""
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}  Analysis Summary - {self.hostname}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}{'='*70}{Style.RESET}", file=sys.stderr)
-        
+        logger.info("=" * 70)
+        logger.info("  Analysis Summary - %s", self.hostname)
+        logger.info("=" * 70)
+
         severity_counts = defaultdict(int)
         for finding in self.findings:
             severity_counts[finding.severity] += 1
-        
-        print(f"\n{Style.INFO}Findings by Severity:{Style.RESET}", file=sys.stderr)
+
+        logger.info("Findings by Severity:")
         for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
             count = severity_counts.get(severity, 0)
             if count > 0:
-                color = Style.CRITICAL if severity == "CRITICAL" else (Style.ERROR if severity == "HIGH" else (Style.WARNING if severity == "MEDIUM" else Style.INFO))
-                print(f"  {color}{severity}: {count}{Style.RESET}", file=sys.stderr)
-        
-        print(f"\n{Style.INFO}Findings by Type:{Style.RESET}", file=sys.stderr)
+                if severity == "CRITICAL":
+                    logger.error("  %s: %d", severity, count)
+                elif severity == "HIGH":
+                    logger.error("  %s: %d", severity, count)
+                elif severity == "MEDIUM":
+                    logger.warning("  %s: %d", severity, count)
+                else:
+                    logger.info("  %s: %d", severity, count)
+
+        logger.info("Findings by Type:")
         for ftype, count in sorted(self.stats.items(), key=lambda x: -x[1])[:15]:
-            print(f"  {ftype}: {count}", file=sys.stderr)
-        
-        print(f"\n{Style.SUCCESS}Total Findings: {len(self.findings)}{Style.RESET}", file=sys.stderr)
+            logger.info("  %s: %d", ftype, count)
+
+        logger.log(25, "Total Findings: %d", len(self.findings))
     
     def export_csv(self) -> Dict[str, str]:
         """Export findings to multiple CSV files by category with hostname-based naming."""
@@ -1404,17 +1436,17 @@ class LinuxSecurityAnalyzer:
         if binary_findings:
             path = write_findings(binary_findings, "binaries")
             output_files["binaries"] = path
-            print(f"{Style.SUCCESS}Binary findings ({len(binary_findings)}) exported to:{Style.RESET} {path}", file=sys.stderr)
+            logger.log(25, "Binary findings (%d) exported to: %s", len(binary_findings), path)
         
         if env_findings:
             path = write_findings(env_findings, "environment")
             output_files["environment"] = path
-            print(f"{Style.SUCCESS}Environment findings ({len(env_findings)}) exported to:{Style.RESET} {path}", file=sys.stderr)
+            logger.log(25, "Environment findings (%d) exported to: %s", len(env_findings), path)
         
         if persistence_findings:
             path = write_findings(persistence_findings, "persistence")
             output_files["persistence"] = path
-            print(f"{Style.SUCCESS}Persistence findings ({len(persistence_findings)}) exported to:{Style.RESET} {path}", file=sys.stderr)
+            logger.log(25, "Persistence findings (%d) exported to: %s", len(persistence_findings), path)
         
         # Also write a combined file
         all_findings_path = os.path.join(self.output_dir, f"{self.hostname}_all_findings.csv")
@@ -1427,8 +1459,16 @@ class LinuxSecurityAnalyzer:
             )):
                 writer.writerow(finding.to_dict())
         output_files["all"] = all_findings_path
-        print(f"{Style.SUCCESS}All findings ({len(self.findings)}) exported to:{Style.RESET} {all_findings_path}", file=sys.stderr)
-        
+        logger.log(25, "All findings (%d) exported to: %s", len(self.findings), all_findings_path)
+
+        # Export unmatched lines
+        if self.unmatched.count > 0:
+            unmatched_path = os.path.join(self.output_dir, f"{self.hostname}_security_unmatched.csv")
+            self.unmatched.export_csv(unmatched_path)
+            output_files["unmatched"] = unmatched_path
+            logger.warning("  %d lines did not match any known format -> %s",
+                           self.unmatched.count, unmatched_path)
+
         return output_files
 
 
@@ -1451,7 +1491,7 @@ def load_hash_list(filepath: str) -> Dict[str, str]:
                 if len(hash_val) in (32, 64) and all(c in '0123456789abcdef' for c in hash_val):
                     hashes[hash_val] = desc
     except Exception as e:
-        print(f"{Style.WARNING}Warning: Could not load hash list: {e}{Style.RESET}", file=sys.stderr)
+        logger.warning("Could not load hash list: %s", e)
     return hashes
 
 
@@ -1460,8 +1500,9 @@ def load_hash_list(filepath: str) -> Dict[str, str]:
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
-    
+    from lft.core.logging import setup_logging
+    setup_logging()
+
     parser = argparse.ArgumentParser(
         description="Comprehensive Linux Security Analyzer - Binary Analysis + Persistence Detection",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1512,31 +1553,31 @@ Output:
     if args.batch:
         batch_dir = os.path.abspath(args.batch)
         if not os.path.isdir(batch_dir):
-            print(f"{Style.ERROR}Error: Batch directory does not exist: {batch_dir}{Style.RESET}", file=sys.stderr)
+            logger.error("Batch directory does not exist: %s", batch_dir)
             sys.exit(1)
-        
+
         tarballs = []
         for ext in UACHandler.TAR_EXTENSIONS:
             import glob
             tarballs.extend(glob.glob(os.path.join(batch_dir, f"*{ext}")))
-        
+
         if not tarballs:
-            print(f"{Style.WARNING}No tarballs found in {batch_dir}{Style.RESET}", file=sys.stderr)
+            logger.warning("No tarballs found in %s", batch_dir)
             sys.exit(1)
-        
-        print(f"\n{Style.HEADER}Batch processing {len(tarballs)} tarballs...{Style.RESET}", file=sys.stderr)
-        
+
+        logger.info("Batch processing %d tarballs...", len(tarballs))
+
         for i, tarball in enumerate(sorted(tarballs), 1):
-            print(f"\n{Style.INFO}[{i}/{len(tarballs)}] {os.path.basename(tarball)}{Style.RESET}", file=sys.stderr)
+            logger.info("[%d/%d] %s", i, len(tarballs), os.path.basename(tarball))
             try:
                 analyzer = LinuxSecurityAnalyzer(tarball, output_dir, known_hashes)
                 analyzer.analyze(verbose=not args.quiet)
                 analyzer.export_csv()
                 analyzer.close()
             except Exception as e:
-                print(f"{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
-        
-        print(f"\n{Style.SUCCESS}Batch processing complete. Results in: {output_dir}{Style.RESET}", file=sys.stderr)
+                logger.error("Error: %s", e)
+
+        logger.log(25, "Batch processing complete. Results in: %s", output_dir)
         return 0
     
     # Single file mode
@@ -1547,7 +1588,7 @@ Output:
     source_path = args.source if args.source == "/" else os.path.abspath(args.source)
     
     if not os.path.exists(source_path):
-        print(f"{Style.ERROR}Error: Source does not exist: {source_path}{Style.RESET}", file=sys.stderr)
+        logger.error("Source does not exist: %s", source_path)
         sys.exit(1)
     
     try:
@@ -1556,12 +1597,12 @@ Output:
         analyzer.export_csv()
         analyzer.close()
     except KeyboardInterrupt:
-        print(f"\n{Style.WARNING}Interrupted{Style.RESET}", file=sys.stderr)
+        logger.warning("Interrupted")
         sys.exit(130)
     except Exception as e:
-        print(f"\n{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: %s", e)
         sys.exit(1)
-    
+
     return 0
 
 

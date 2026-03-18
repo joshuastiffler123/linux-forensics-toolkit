@@ -29,6 +29,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import lzma
 import os
 import re
@@ -54,8 +55,9 @@ except ImportError:
 DEFAULT_MAX_MESSAGE_LENGTH = 50000  # 50KB - enough for base64 payloads
 
 
-from lft_style import Style
-from lft_uac import UACHandler
+from lft.core.uac import UACHandler, UnmatchedWriter
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -213,7 +215,9 @@ class JournalEntry:
             "UID": self.uid if self.uid >= 0 else "",
             "User": self._extract_user_from_message(),
             "Source_IP": self._extract_ip_from_message(),
-            "Message": cleaned_msg[:max_len] if cleaned_msg else "",
+            "Message": (cleaned_msg[:max_len] + " [TRUNCATED]"
+                        if cleaned_msg and len(cleaned_msg) > max_len
+                        else (cleaned_msg or "")),
             "Source_File": os.path.basename(self.source_file) if self.source_file else "",
         }
     
@@ -603,6 +607,7 @@ class JournalParser:
         # For forensic analysis, this should be set based on file mtimes or other context,
         # not datetime.now(tz=timezone.utc).replace(tzinfo=None) which would be incorrect for historical evidence.
         self.reference_date = reference_date
+        self.unmatched = UnmatchedWriter()
     
     def parse_all(self) -> List[JournalEntry]:
         """Parse all available journal sources."""
@@ -647,21 +652,25 @@ class JournalParser:
         """Parse text format journal export."""
         try:
             content = data.decode('utf-8', errors='replace')
-        except:
+        except Exception:
+            logger.debug("Could not decode text journal data from %s", source_file)
             return
-        
+
         # Detect format type
         lines = content.split('\n')
-        
-        for line in lines:
+
+        for line_number, line in enumerate(lines, start=1):
+            raw_line = line
             line = line.strip()
             if not line:
                 continue
-            
+
             entry = self._parse_text_line(line, source_file)
             if entry:
                 self.entries.append(entry)
                 self.stats["text_entries"] += 1
+            else:
+                self.unmatched.add(source_file, line_number, raw_line)
     
     def _parse_text_line(self, line: str, source_file: str = "") -> Optional[JournalEntry]:
         """Parse a single text journal line."""
@@ -715,9 +724,10 @@ class JournalParser:
         """Parse JSON format journal export."""
         try:
             content = data.decode('utf-8', errors='replace')
-        except:
+        except Exception:
+            logger.debug("Could not decode JSON journal data from %s", source_file)
             return
-        
+
         # JSON export can be newline-delimited JSON objects
         for line in content.split('\n'):
             line = line.strip()
@@ -742,15 +752,17 @@ class JournalParser:
             try:
                 ts_us = int(obj['__REALTIME_TIMESTAMP'])
                 timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
-            except:
+            except Exception:
+                logger.debug("Could not parse __REALTIME_TIMESTAMP from journal entry")
                 pass
         elif '_SOURCE_REALTIME_TIMESTAMP' in obj:
             try:
                 ts_us = int(obj['_SOURCE_REALTIME_TIMESTAMP'])
                 timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
-            except:
+            except Exception:
+                logger.debug("Could not parse _SOURCE_REALTIME_TIMESTAMP from journal entry")
                 pass
-        
+
         if not timestamp:
             return None
         
@@ -764,7 +776,8 @@ class JournalParser:
             # Binary data stored as byte array
             try:
                 message = bytes(message).decode('utf-8', errors='replace')
-            except:
+            except Exception:
+                logger.debug("Could not decode binary MESSAGE field, falling back to str()")
                 message = str(message)
         
         # Extract unit/identifier
@@ -870,7 +883,7 @@ class JournalParser:
             offset = header_size if header_size > 0 else 256
             max_offset = len(data) - 64
             
-            while offset < max_offset and entries_parsed < 100000:
+            while offset < max_offset and entries_parsed < 5_000_000:
                 # Object header: type(1), flags(1), reserved(6), size(8)
                 if offset + 16 > len(data):
                     break
@@ -1124,7 +1137,7 @@ class JournalParser:
         message_pattern = b'MESSAGE='
         offset = 0
         
-        while offset < len(data) - 100 and entries_parsed < 50000:
+        while offset < len(data) - 100 and entries_parsed < 5_000_000:
             idx = data.find(message_pattern, offset)
             if idx == -1:
                 break
@@ -1170,9 +1183,10 @@ class JournalParser:
                                 ts_us = int(ts_str)
                                 if 1000000000000 < ts_us < 2000000000000000:
                                     timestamp = datetime.fromtimestamp(ts_us / 1000000, tz=timezone.utc).replace(tzinfo=None)
-                            except:
+                            except Exception:
+                                logger.debug("Could not parse text timestamp from binary journal context")
                                 pass
-                    
+
                     # Method 2: Try to find binary timestamp near the message
                     # In binary journals, realtime is stored at offset 24 in entry objects
                     # Look backwards for a valid timestamp pattern
@@ -1187,7 +1201,8 @@ class JournalParser:
                                     if 1262304000000000 < potential_ts < 1900000000000000:
                                         timestamp = datetime.fromtimestamp(potential_ts / 1000000, tz=timezone.utc).replace(tzinfo=None)
                                         break
-                                except:
+                                except Exception:
+                                    logger.debug("Could not parse binary timestamp at offset in journal entry")
                                     pass
                     
                     # Method 3: Extract epoch timestamp from message content
@@ -1208,7 +1223,8 @@ class JournalParser:
                                     if 1262304000 < epoch_sec < 1900000000:
                                         timestamp = datetime.fromtimestamp(epoch_sec, tz=timezone.utc).replace(tzinfo=None)
                                         break
-                                except:
+                                except Exception:
+                                    logger.debug("Could not parse epoch timestamp from message content")
                                     pass
                     
                     if not timestamp:
@@ -1256,7 +1272,8 @@ class JournalParser:
         
         try:
             return context[value_start:value_end].decode('utf-8', errors='replace').strip()
-        except:
+        except Exception:
+            logger.debug("Could not decode binary journal field value")
             return ''
     
     def _parse_timestamp(self, ts_str: str, reference_date: datetime = None) -> Optional[datetime]:
@@ -1313,9 +1330,10 @@ class JournalParser:
                     timestamp = timestamp.replace(year=reference_year + 1)
                 
                 return timestamp
-            except:
+            except Exception:
+                logger.debug("Could not parse syslog-style timestamp: %s", ts_str[:40])
                 pass
-        
+
         # Try standard formats (these include year, so no inference needed)
         for fmt in formats:
             try:
@@ -1386,7 +1404,7 @@ class JournalAnalyzer:
     def analyze(self, verbose: bool = True) -> None:
         """Run analysis on journal entries."""
         if verbose:
-            print(f"\n{Style.INFO}Analyzing {len(self.entries)} journal entries...{Style.RESET}", file=sys.stderr)
+            logger.info("Analyzing %d journal entries...", len(self.entries))
         
         for entry in self.entries:
             self.summary["total"] += 1
@@ -1452,29 +1470,35 @@ class JournalAnalyzer:
     
     def print_summary(self) -> None:
         """Print analysis summary."""
-        print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}  Journal Analysis Summary{Style.RESET}", file=sys.stderr)
-        print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-        
-        print(f"\n{Style.INFO}Total Entries:{Style.RESET} {self.summary['total']}", file=sys.stderr)
-        print(f"{Style.WARNING}Security Events:{Style.RESET} {self.summary['security_events']}", file=sys.stderr)
-        print(f"{Style.ERROR}High Priority (ERR+):{Style.RESET} {self.summary['high_priority']}", file=sys.stderr)
-        
-        print(f"\n{Style.INFO}By Priority:{Style.RESET}", file=sys.stderr)
+        logger.info("%s", "=" * 60)
+        logger.info("  Journal Analysis Summary")
+        logger.info("%s", "=" * 60)
+
+        logger.info("Total Entries: %d", self.summary['total'])
+        logger.warning("Security Events: %d", self.summary['security_events'])
+        logger.error("High Priority (ERR+): %d", self.summary['high_priority'])
+
+        logger.info("By Priority:")
         for priority in ["EMERG", "ALERT", "CRIT", "ERR", "WARNING", "NOTICE", "INFO", "DEBUG"]:
             count = self.summary.get(f"priority_{priority}", 0)
             if count > 0:
-                color = Style.CRITICAL if priority in ["EMERG", "ALERT", "CRIT"] else (
-                        Style.ERROR if priority == "ERR" else (
-                        Style.WARNING if priority == "WARNING" else Style.INFO))
-                print(f"  {color}{priority}: {count}{Style.RESET}", file=sys.stderr)
-        
-        print(f"\n{Style.INFO}By Category:{Style.RESET}", file=sys.stderr)
-        category_counts = [(k.replace("category_", ""), v) for k, v in self.summary.items() 
+                if priority in ["EMERG", "ALERT", "CRIT"]:
+                    logger.error("  %s: %d", priority, count)
+                elif priority == "ERR":
+                    logger.error("  %s: %d", priority, count)
+                elif priority == "WARNING":
+                    logger.warning("  %s: %d", priority, count)
+                else:
+                    logger.info("  %s: %d", priority, count)
+
+        logger.info("By Category:")
+        category_counts = [(k.replace("category_", ""), v) for k, v in self.summary.items()
                           if k.startswith("category_") and v > 0]
         for cat, count in sorted(category_counts, key=lambda x: -x[1])[:15]:
-            color = Style.WARNING if cat in ["AUTH_FAILURE", "SECURITY"] else Style.INFO
-            print(f"  {color}{cat}: {count}{Style.RESET}", file=sys.stderr)
+            if cat in ["AUTH_FAILURE", "SECURITY"]:
+                logger.warning("  %s: %d", cat, count)
+            else:
+                logger.info("  %s: %d", cat, count)
 
 
 # ============================================================================
@@ -1484,7 +1508,7 @@ class JournalAnalyzer:
 def export_csv(entries: List[JournalEntry], output_path: str, max_message_length: int = None, hostname: str = "unknown") -> None:
     """Export entries to CSV."""
     if not entries:
-        print(f"{Style.WARNING}No entries to export{Style.RESET}", file=sys.stderr)
+        logger.warning("No entries to export")
         return
     
     # If output_path is a directory, create a filename inside it
@@ -1506,7 +1530,7 @@ def export_csv(entries: List[JournalEntry], output_path: str, max_message_length
         for entry in entries:
             writer.writerow(entry.to_dict(max_message_length))
     
-    print(f"{Style.SUCCESS}Exported {len(entries)} entries to:{Style.RESET} {output_path}", file=sys.stderr)
+    logger.log(25, "Exported %d entries to: %s", len(entries), output_path)
 
 
 def export_security_report(entries: List[JournalEntry], output_path: str, max_message_length: int = None) -> None:
@@ -1517,7 +1541,7 @@ def export_security_report(entries: List[JournalEntry], output_path: str, max_me
     security_entries = [e for e in entries if e.category in security_categories]
     
     if not security_entries:
-        print(f"{Style.WARNING}No security events to export{Style.RESET}", file=sys.stderr)
+        logger.warning("No security events to export")
         return
     
     export_csv(security_entries, output_path, max_message_length)
@@ -1528,7 +1552,8 @@ def export_security_report(entries: List[JournalEntry], output_path: str, max_me
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    from lft.core.logging import setup_logging
+    setup_logging()
     
     parser = argparse.ArgumentParser(
         description="Linux Journal Analyzer - Parse and analyze systemd journal logs",
@@ -1592,7 +1617,7 @@ Supported Formats:
     
     # Validate source
     if not os.path.exists(args.source):
-        print(f"{Style.ERROR}Error: Source not found: {args.source}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: Source not found: %s", args.source)
         return 1
     
     output_dir = args.output or os.getcwd()
@@ -1603,21 +1628,21 @@ Supported Formats:
     try:
         # Initialize handler
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}  Linux Journal Analyzer v{__version__}{Style.RESET}", file=sys.stderr)
-            print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}", file=sys.stderr)
-            print(f"\n{Style.INFO}Source:{Style.RESET} {args.source}", file=sys.stderr)
+            logger.info("=" * 60)
+            logger.info("  Linux Journal Analyzer v%s", __version__)
+            logger.info("=" * 60)
+            logger.info("Source: %s", args.source)
         
         handler = UACHandler(args.source)
         hostname = handler.hostname
         
         if verbose:
-            print(f"{Style.INFO}Hostname:{Style.RESET} {hostname}", file=sys.stderr)
-            print(f"{Style.INFO}Mode:{Style.RESET} {'Tarball' if handler.is_tarball else 'Directory'}", file=sys.stderr)
+            logger.info("Hostname: %s", hostname)
+            logger.info("Mode: %s", "Tarball" if handler.is_tarball else "Directory")
         
         # Parse journal entries
         if verbose:
-            print(f"\n{Style.INFO}Parsing journal entries...{Style.RESET}", file=sys.stderr)
+            logger.info("Parsing journal entries...")
         
         # Determine reference date for year inference on syslog-style timestamps
         # For forensic analysis, use file mtime rather than datetime.now(tz=timezone.utc).replace(tzinfo=None)
@@ -1627,7 +1652,7 @@ Supported Formats:
                 mtime = os.path.getmtime(args.source)
                 reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                 if verbose:
-                    print(f"{Style.INFO}Reference date (from file mtime, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                    logger.info("Reference date (from file mtime, UTC): %s", reference_date.strftime('%Y-%m-%d'))
             except (OSError, ValueError):
                 pass
         elif os.path.isdir(args.source):
@@ -1642,7 +1667,7 @@ Supported Formats:
                         mtime = os.path.getmtime(log_path)
                         reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                         if verbose:
-                            print(f"{Style.INFO}Reference date (from {log_pattern}, UTC):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                            logger.info("Reference date (from %s, UTC): %s", log_pattern, reference_date.strftime('%Y-%m-%d'))
                         break
                 
                 # If not found, search recursively for var/log
@@ -1660,7 +1685,7 @@ Supported Formats:
                                         reference_date = datetime.fromtimestamp(mtime, tz=timezone.utc).replace(tzinfo=None)
                                         rel_path = os.path.relpath(log_path, args.source)
                                         if verbose:
-                                            print(f"{Style.INFO}Reference date (from {rel_path}):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+                                            logger.info("Reference date (from %s): %s", rel_path, reference_date.strftime('%Y-%m-%d'))
                                         break
                                 if reference_date:
                                     break
@@ -1671,40 +1696,39 @@ Supported Formats:
         
         if reference_date is None:
             reference_date = datetime.now(tz=timezone.utc).replace(tzinfo=None)
-            if verbose:
-                print(f"{Style.WARNING}Reference date (using current UTC - may be inaccurate):{Style.RESET} {reference_date.strftime('%Y-%m-%d')}", file=sys.stderr)
+            logger.warning("Reference date (using current UTC - may be inaccurate): %s", reference_date.strftime('%Y-%m-%d'))
         
         parser_obj = JournalParser(handler, reference_date=reference_date)
         entries = parser_obj.parse_all()
         
         if verbose:
-            print(f"  Found {len(entries)} entries", file=sys.stderr)
-            
+            logger.info("  Found %d entries", len(entries))
+
             # Report on binary journal parsing
             if parser_obj.stats.get("binary_journals", 0) > 0:
                 binary_count = parser_obj.stats.get("binary_journals", 0)
                 binary_entries = parser_obj.stats.get("binary_entries", 0)
-                print(f"  Binary journals found: {binary_count}", file=sys.stderr)
-                print(f"  Entries from binary: {binary_entries}", file=sys.stderr)
+                logger.info("  Binary journals found: %d", binary_count)
+                logger.info("  Entries from binary: %d", binary_entries)
             
             if parser_obj.stats.get("entries_skipped_no_timestamp", 0) > 0:
                 skipped = parser_obj.stats.get("entries_skipped_no_timestamp", 0)
-                print(f"  {Style.WARNING}Skipped {skipped} entries without extractable timestamps{Style.RESET}", file=sys.stderr)
+                logger.warning("  Skipped %d entries without extractable timestamps", skipped)
             
             if parser_obj.stats.get("binary_needs_export"):
-                print(f"\n{Style.WARNING}Note: Some binary journals could not be fully parsed.{Style.RESET}", file=sys.stderr)
+                logger.warning("Note: Some binary journals could not be fully parsed.")
                 if parser_obj.stats.get("lz4_not_available"):
-                    print(f"  {Style.ERROR}LZ4 compression detected but lz4 library not installed!{Style.RESET}", file=sys.stderr)
-                    print(f"  Install with: pip install lz4", file=sys.stderr)
-                print(f"  For more complete data, export on the source system:", file=sys.stderr)
-                print(f"  journalctl --no-pager -o json > journal_export.json", file=sys.stderr)
+                    logger.error("LZ4 compression detected but lz4 library not installed!")
+                    logger.info("  Install with: pip install lz4")
+                logger.info("  For more complete data, export on the source system:")
+                logger.info("  journalctl --no-pager -o json > journal_export.json")
             
             if not HAS_LZ4 and parser_obj.stats.get("binary_journals", 0) > 0:
-                print(f"\n{Style.INFO}Tip: Install lz4 for better binary journal parsing:{Style.RESET}", file=sys.stderr)
-                print(f"  pip install lz4", file=sys.stderr)
+                logger.info("Tip: Install lz4 for better binary journal parsing:")
+                logger.info("  pip install lz4")
         
         if not entries:
-            print(f"\n{Style.WARNING}No journal entries found{Style.RESET}", file=sys.stderr)
+            logger.warning("No journal entries found")
             handler.close()
             return 0
         
@@ -1722,13 +1746,13 @@ Supported Formats:
             try:
                 start_time = datetime.strptime(args.since, "%Y-%m-%d %H:%M:%S") if ' ' in args.since else datetime.strptime(args.since, "%Y-%m-%d")
             except ValueError:
-                print(f"{Style.WARNING}Invalid --since format, using all entries{Style.RESET}", file=sys.stderr)
+                logger.warning("Invalid --since format, using all entries")
         
         if args.until:
             try:
                 end_time = datetime.strptime(args.until, "%Y-%m-%d %H:%M:%S") if ' ' in args.until else datetime.strptime(args.until, "%Y-%m-%d") + timedelta(days=1)
             except ValueError:
-                print(f"{Style.WARNING}Invalid --until format, using all entries{Style.RESET}", file=sys.stderr)
+                logger.warning("Invalid --until format, using all entries")
         
         # Unit filter
         units = set(args.unit.split(',')) if args.unit else None
@@ -1755,7 +1779,7 @@ Supported Formats:
                 security_only=args.security
             )
             if verbose:
-                print(f"\n{Style.INFO}Filtered to {len(filtered_entries)} entries{Style.RESET}", file=sys.stderr)
+                logger.info("Filtered to %d entries", len(filtered_entries))
         
         # Print summary
         if verbose:
@@ -1774,19 +1798,27 @@ Supported Formats:
             # Also export security events
             sec_path = os.path.join(output_dir, f"{hostname}_journal_security.csv")
             export_security_report(entries, sec_path, max_msg_len)
-        
+
+        # Export unmatched text lines (if any)
+        if parser_obj.unmatched.count > 0:
+            unmatched_path = os.path.join(output_dir, f"{hostname}_journal_unmatched.csv")
+            parser_obj.unmatched.export_csv(unmatched_path)
+            if verbose:
+                logger.warning("  %d text lines did not match any known format -> %s",
+                               parser_obj.unmatched.count, unmatched_path)
+
         handler.close()
         
         if verbose:
-            print(f"\n{Style.SUCCESS}Analysis complete!{Style.RESET}", file=sys.stderr)
+            logger.log(25, "Analysis complete!")
         
         return 0
         
     except KeyboardInterrupt:
-        print(f"\n{Style.WARNING}Interrupted{Style.RESET}", file=sys.stderr)
+        logger.warning("Interrupted")
         return 130
     except Exception as e:
-        print(f"\n{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: %s", e)
         import traceback
         traceback.print_exc()
         return 1

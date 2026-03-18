@@ -34,6 +34,7 @@ License: MIT
 import argparse
 import csv
 import json
+import logging
 import os
 import re
 import shutil
@@ -42,6 +43,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 __version__ = "2.0.0"
 
@@ -113,35 +116,34 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
     vol_dir = get_volatility_dir()
     
     if verbose:
-        print(f"\n{'='*60}")
-        print(f"  Volatility 3 Automatic Setup")
-        print(f"{'='*60}\n")
+        logger.info("=" * 60)
+        logger.info("  Volatility 3 Automatic Setup")
+        logger.info("=" * 60)
     
     # Step 1: Check for git
     if verbose:
-        print("[1/5] Checking prerequisites...", end=" ", flush=True)
-    
+        logger.info("[1/5] Checking prerequisites...")
+
     git_available = shutil.which('git') is not None
-    
+
     if not git_available:
-        if verbose:
-            print("FAILED")
-            print("\n  Git is not installed. Please install git first:")
-            print("  - Windows: https://git-scm.com/download/win")
-            print("  - Linux: sudo apt install git")
-            print("  - macOS: brew install git")
+        logger.error("FAILED")
+        logger.error("Git is not installed. Please install git first:")
+        logger.error("  - Windows: https://git-scm.com/download/win")
+        logger.error("  - Linux: sudo apt install git")
+        logger.error("  - macOS: brew install git")
         return False, "Git not found"
-    
+
     if verbose:
-        print("OK")
+        logger.info("OK")
     
     # Step 2: Clone volatility3
     if verbose:
-        print("[2/5] Downloading Volatility 3...", end=" ", flush=True)
-    
+        logger.info("[2/5] Downloading Volatility 3...")
+
     if os.path.exists(vol_dir):
         if verbose:
-            print("EXISTS (skipping clone)")
+            logger.info("EXISTS (skipping clone)")
     else:
         try:
             result = subprocess.run(
@@ -152,29 +154,26 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
                 cwd=script_dir
             )
             if result.returncode != 0:
-                if verbose:
-                    print("FAILED")
-                    print(f"  Error: {result.stderr[:200]}")
+                logger.error("FAILED")
+                logger.error("  Error: %s", result.stderr[:200])
                 return False, f"Git clone failed: {result.stderr[:100]}"
             if verbose:
-                print("OK")
+                logger.info("OK")
         except subprocess.TimeoutExpired:
-            if verbose:
-                print("TIMEOUT")
+            logger.error("TIMEOUT")
             return False, "Git clone timed out"
         except Exception as e:
-            if verbose:
-                print(f"ERROR: {e}")
+            logger.error("ERROR: %s", e)
             return False, str(e)
     
     # Step 3: Create virtual environment
     if verbose:
-        print("[3/5] Creating virtual environment...", end=" ", flush=True)
-    
+        logger.info("[3/5] Creating virtual environment...")
+
     venv_dir = os.path.join(vol_dir, 'venv')
     if os.path.exists(venv_dir):
         if verbose:
-            print("EXISTS (skipping)")
+            logger.info("EXISTS (skipping)")
     else:
         try:
             result = subprocess.run(
@@ -185,25 +184,23 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
                 cwd=vol_dir
             )
             if result.returncode != 0:
-                if verbose:
-                    print("FAILED")
+                logger.error("FAILED")
                 return False, f"venv creation failed: {result.stderr[:100]}"
             if verbose:
-                print("OK")
+                logger.info("OK")
         except Exception as e:
-            if verbose:
-                print(f"ERROR: {e}")
+            logger.error("ERROR: %s", e)
             return False, str(e)
     
     # Step 4: Install volatility3 in dev mode
     if verbose:
-        print("[4/5] Installing Volatility 3 (this may take a few minutes)...", end=" ", flush=True)
-    
+        logger.info("[4/5] Installing Volatility 3 (this may take a few minutes)...")
+
     if sys.platform == 'win32':
         pip_path = os.path.join(venv_dir, 'Scripts', 'pip.exe')
     else:
         pip_path = os.path.join(venv_dir, 'bin', 'pip')
-    
+
     try:
         result = subprocess.run(
             [pip_path, 'install', '-e', '.[dev]'],
@@ -213,35 +210,32 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
             cwd=vol_dir
         )
         if result.returncode != 0:
-            if verbose:
-                print("FAILED")
-                print(f"  Error: {result.stderr[:300]}")
+            logger.error("FAILED")
+            logger.error("  Error: %s", result.stderr[:300])
             return False, f"pip install failed: {result.stderr[:100]}"
         if verbose:
-            print("OK")
+            logger.info("OK")
     except subprocess.TimeoutExpired:
-        if verbose:
-            print("TIMEOUT")
+        logger.error("TIMEOUT")
         return False, "pip install timed out"
     except Exception as e:
-        if verbose:
-            print(f"ERROR: {e}")
+        logger.error("ERROR: %s", e)
         return False, str(e)
     
     # Step 5: Apply schema fix for btf/symdb support
     if verbose:
-        print("[5/5] Applying schema fix for extended symbol support...", end=" ", flush=True)
-    
+        logger.info("[5/5] Applying schema fix for extended symbol support...")
+
     schema_dir = os.path.join(vol_dir, 'volatility3', 'schemas')
     schema_fixed = False
-    
+
     try:
         for filename in os.listdir(schema_dir):
             if filename.startswith('schema-') and filename.endswith('.json'):
                 schema_path = os.path.join(schema_dir, filename)
                 with open(schema_path, 'r') as f:
                     content = f.read()
-                
+
                 if SCHEMA_OLD_PATTERN in content:
                     content = content.replace(SCHEMA_OLD_PATTERN, SCHEMA_NEW_PATTERN)
                     with open(schema_path, 'w') as f:
@@ -249,26 +243,25 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
                     schema_fixed = True
                 elif SCHEMA_NEW_PATTERN in content:
                     schema_fixed = True  # Already fixed
-        
+
         if verbose:
             if schema_fixed:
-                print("OK")
+                logger.info("OK")
             else:
-                print("SKIPPED (pattern not found)")
+                logger.info("SKIPPED (pattern not found)")
     except Exception as e:
-        if verbose:
-            print(f"WARNING: {e}")
-    
+        logger.warning("WARNING: %s", e)
+
     # Verify installation
     vol_path = get_venv_vol_path()
     if vol_path and os.path.exists(vol_path):
         if verbose:
-            print(f"\n{'='*60}")
-            print(f"  Setup Complete!")
-            print(f"{'='*60}")
-            print(f"\nVolatility 3 installed at: {vol_path}")
-            print(f"\nYou can now run:")
-            print(f"  python {os.path.basename(__file__)} -i <memory_image.lime>")
+            logger.info("=" * 60)
+            logger.info("  Setup Complete!")
+            logger.info("=" * 60)
+            logger.info("Volatility 3 installed at: %s", vol_path)
+            logger.info("You can now run:")
+            logger.info("  python %s -i <memory_image.lime>", os.path.basename(__file__))
         return True, vol_path
     else:
         return False, "Installation completed but vol executable not found"
@@ -276,53 +269,49 @@ def setup_volatility(verbose: bool = True) -> Tuple[bool, str]:
 
 def print_setup_instructions():
     """Print manual setup instructions when auto-setup is not available."""
-    print(f"\n{'='*60}")
-    print(f"  Volatility 3 Setup Required")
-    print(f"{'='*60}")
-    print(f"""
-Volatility 3 is not installed. You have two options:
-
-OPTION 1: Automatic Setup (Recommended)
-  Run this script with --setup flag:
-  
-    python {os.path.basename(__file__)} --setup
-  
-  This will automatically:
-  - Download Volatility 3 from GitHub
-  - Create a Python virtual environment
-  - Install all dependencies
-  - Apply the schema fix for extended symbol support
-
-OPTION 2: Manual Setup
-  1. Clone Volatility 3:
-     git clone https://github.com/volatilityfoundation/volatility3.git
-  
-  2. Create and activate a virtual environment:
-     cd volatility3
-     python -m venv venv
-     
-     # Windows:
-     .\\venv\\Scripts\\activate
-     
-     # Linux/Mac:
-     source venv/bin/activate
-  
-  3. Install in development mode:
-     pip install -e ".[dev]"
-  
-  4. (Optional) Apply schema fix for btf/symdb support:
-     Edit volatility3/schemas/schema-6.2.0.json
-     Find:  "pattern": "^(dwarf|symtab|system-map)$"
-     Replace with: "pattern": "^(btf|symdb|dwarf|symtab|system-map)$"
-
-Prerequisites:
-  - Python 3.8 or higher
-  - Git (for automatic setup)
-  - Internet connection
-""")
-
-
-from lft_style import Style
+    logger.info("=" * 60)
+    logger.info("  Volatility 3 Setup Required")
+    logger.info("=" * 60)
+    logger.info("")
+    logger.info("Volatility 3 is not installed. You have two options:")
+    logger.info("")
+    logger.info("OPTION 1: Automatic Setup (Recommended)")
+    logger.info("  Run this script with --setup flag:")
+    logger.info("")
+    logger.info("    python %s --setup", os.path.basename(__file__))
+    logger.info("")
+    logger.info("  This will automatically:")
+    logger.info("  - Download Volatility 3 from GitHub")
+    logger.info("  - Create a Python virtual environment")
+    logger.info("  - Install all dependencies")
+    logger.info("  - Apply the schema fix for extended symbol support")
+    logger.info("")
+    logger.info("OPTION 2: Manual Setup")
+    logger.info("  1. Clone Volatility 3:")
+    logger.info("     git clone https://github.com/volatilityfoundation/volatility3.git")
+    logger.info("")
+    logger.info("  2. Create and activate a virtual environment:")
+    logger.info("     cd volatility3")
+    logger.info("     python -m venv venv")
+    logger.info("")
+    logger.info("     # Windows:")
+    logger.info("     .\\venv\\Scripts\\activate")
+    logger.info("")
+    logger.info("     # Linux/Mac:")
+    logger.info("     source venv/bin/activate")
+    logger.info("")
+    logger.info("  3. Install in development mode:")
+    logger.info('     pip install -e ".[dev]"')
+    logger.info("")
+    logger.info("  4. (Optional) Apply schema fix for btf/symdb support:")
+    logger.info("     Edit volatility3/schemas/schema-6.2.0.json")
+    logger.info('     Find:  "pattern": "^(dwarf|symtab|system-map)$"')
+    logger.info('     Replace with: "pattern": "^(btf|symdb|dwarf|symtab|system-map)$"')
+    logger.info("")
+    logger.info("Prerequisites:")
+    logger.info("  - Python 3.8 or higher")
+    logger.info("  - Git (for automatic setup)")
+    logger.info("  - Internet connection")
 
 
 # ============================================================================
@@ -518,19 +507,19 @@ class VolatilityRunner:
             Kernel banner string if found, None otherwise
         """
         if verbose:
-            print(f"\n{Style.INFO}Detecting kernel banner...{Style.RESET}", end=" ", flush=True)
-        
+            logger.info("Detecting kernel banner...")
+
         try:
             # Use offline mode for banner detection - it doesn't need symbols
             cmd = self._build_base_cmd(offline=True) + ['-r', 'csv', 'banners.Banners']
-            
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=120
             )
-            
+
             if result.returncode == 0 and result.stdout.strip():
                 # Parse CSV output to get banner
                 lines = result.stdout.strip().split('\n')
@@ -543,21 +532,18 @@ class VolatilityRunner:
                             if match:
                                 self.kernel_banner = match.group(0)
                                 if verbose:
-                                    print(f"{Style.SUCCESS}Found{Style.RESET}")
-                                    print(f"  {Style.DIM}{self.kernel_banner[:80]}...{Style.RESET}")
+                                    logger.log(25, "Found")
+                                    logger.debug("  %s...", self.kernel_banner[:80])
                                 return self.kernel_banner
-            
-            if verbose:
-                print(f"{Style.WARNING}Not found{Style.RESET}")
+
+            logger.warning("Not found")
             return None
-            
+
         except subprocess.TimeoutExpired:
-            if verbose:
-                print(f"{Style.WARNING}Timeout{Style.RESET}")
+            logger.warning("Timeout")
             return None
         except Exception as e:
-            if verbose:
-                print(f"{Style.WARNING}Error: {e}{Style.RESET}")
+            logger.warning("Error: %s", e)
             return None
     
     def check_symbols(self, verbose: bool = True) -> Tuple[bool, str]:
@@ -568,47 +554,43 @@ class VolatilityRunner:
             Tuple of (symbols_available, message)
         """
         if verbose:
-            print(f"{Style.INFO}Checking symbol table availability...{Style.RESET}", end=" ", flush=True)
-        
+            logger.info("Checking symbol table availability...")
+
         try:
             # Try linux.vmcoreinfo which needs symbols
             cmd = self._build_base_cmd() + ['linux.vmcoreinfo.VMCoreInfo']
-            
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=120
             )
-            
+
             stderr = result.stderr.lower()
-            
+
             # Check for symbol-related errors
             if 'symbol_table_name' in stderr or 'unsatisfied requirement' in stderr:
                 self.symbols_found = False
-                if verbose:
-                    print(f"{Style.ERROR}NOT FOUND{Style.RESET}")
+                logger.error("NOT FOUND")
                 return False, "Symbol tables not found for this kernel"
-            
+
             if result.returncode == 0:
                 self.symbols_found = True
                 if verbose:
-                    print(f"{Style.SUCCESS}Available{Style.RESET}")
+                    logger.log(25, "Available")
                 return True, "Symbols available"
-            
+
             # Other error
             self.symbols_found = False
-            if verbose:
-                print(f"{Style.WARNING}Unknown{Style.RESET}")
+            logger.warning("Unknown")
             return False, result.stderr[:200]
-            
+
         except subprocess.TimeoutExpired:
-            if verbose:
-                print(f"{Style.WARNING}Timeout{Style.RESET}")
+            logger.warning("Timeout")
             return False, "Timeout checking symbols"
         except Exception as e:
-            if verbose:
-                print(f"{Style.WARNING}Error{Style.RESET}")
+            logger.warning("Error")
             return False, str(e)
     
     def run_plugin(self, plugin: str, output_file: str, description: str = "",
@@ -629,12 +611,12 @@ class VolatilityRunner:
         stderr_path = os.path.join(self.output_dir, output_file.replace('.csv', '.stderr'))
         
         if verbose:
-            print(f"  {Style.INFO}Running {plugin}...{Style.RESET}", end=" ", flush=True)
-        
+            logger.info("  Running %s...", plugin)
+
         try:
             # Build command with ISF/symbol support
             cmd = self._build_base_cmd() + ['-r', 'csv', plugin]
-            
+
             # Run volatility
             with open(output_path, 'w') as stdout_file, open(stderr_path, 'w') as stderr_file:
                 result = subprocess.run(
@@ -643,48 +625,45 @@ class VolatilityRunner:
                     stderr=stderr_file,
                     timeout=600  # 10 minute timeout per plugin
                 )
-            
+
             # Check results
             if result.returncode == 0:
                 # Count lines in output
                 with open(output_path, 'r') as f:
                     line_count = sum(1 for _ in f) - 1  # Subtract header
-                
+
                 self.results[plugin] = {
                     'success': True,
                     'output_file': output_path,
                     'line_count': max(0, line_count)
                 }
-                
+
                 if verbose:
                     if line_count > 0:
-                        print(f"{Style.SUCCESS}OK ({line_count} rows){Style.RESET}")
+                        logger.log(25, "OK (%d rows)", line_count)
                     else:
-                        print(f"{Style.WARNING}OK (no data){Style.RESET}")
-                
+                        logger.warning("OK (no data)")
+
                 return True, f"Success: {line_count} rows"
             else:
                 # Read stderr for error message
                 with open(stderr_path, 'r') as f:
                     error = f.read().strip()[:200]
-                
+
                 self.errors[plugin] = error
-                
-                if verbose:
-                    print(f"{Style.ERROR}FAILED{Style.RESET}")
-                
+
+                logger.error("FAILED")
+
                 return False, error
-                
+
         except subprocess.TimeoutExpired:
             self.errors[plugin] = "Timeout (>10 minutes)"
-            if verbose:
-                print(f"{Style.ERROR}TIMEOUT{Style.RESET}")
+            logger.error("TIMEOUT")
             return False, "Plugin timed out"
-            
+
         except Exception as e:
             self.errors[plugin] = str(e)
-            if verbose:
-                print(f"{Style.ERROR}ERROR: {e}{Style.RESET}")
+            logger.error("ERROR: %s", e)
             return False, str(e)
     
     def run_all_plugins(self, categories: Dict = None, verbose: bool = True) -> Dict:
@@ -706,7 +685,7 @@ class VolatilityRunner:
         
         for category, plugins in categories.items():
             if verbose:
-                print(f"\n{Style.HEADER}{Style.BOLD}[{category}]{Style.RESET}")
+                logger.info("[%s]", category)
             
             for plugin, output_file, description in plugins:
                 self.run_plugin(plugin, output_file, description, verbose)
@@ -792,14 +771,14 @@ class LinuxMemoryAnalyzer:
         os.makedirs(self.output_dir, exist_ok=True)
         
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-            print(f"{Style.HEADER}{Style.BOLD}  Linux Memory Analyzer v{__version__}{Style.RESET}")
-            print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-            print(f"\n{Style.INFO}Image:{Style.RESET} {self.image_path}")
-            print(f"{Style.INFO}Output:{Style.RESET} {self.output_dir}")
-            
+            logger.info("=" * 60)
+            logger.info("  Linux Memory Analyzer v%s", __version__)
+            logger.info("=" * 60)
+            logger.info("Image: %s", self.image_path)
+            logger.info("Output: %s", self.output_dir)
+
             size_mb = os.path.getsize(self.image_path) / (1024 * 1024)
-            print(f"{Style.INFO}Image Size:{Style.RESET} {size_mb:.1f} MB")
+            logger.info("Image Size: %.1f MB", size_mb)
         
         # Step 1: Detect kernel banner (works without symbols)
         banner = self.vol_runner.detect_kernel_banner(verbose)
@@ -818,7 +797,7 @@ class LinuxMemoryAnalyzer:
         
         # Run all plugins
         if verbose:
-            print(f"\n{Style.INFO}Running plugins (Volatility will attempt to download symbols automatically)...{Style.RESET}")
+            logger.info("Running plugins (Volatility will attempt to download symbols automatically)...")
         
         results = self.vol_runner.run_all_plugins(plugins_to_run, verbose)
         
@@ -831,31 +810,31 @@ class LinuxMemoryAnalyzer:
     
     def _print_symbol_guidance(self, banner: Optional[str] = None):
         """Print guidance for obtaining symbol tables."""
-        print(f"\n{Style.WARNING}{'='*60}{Style.RESET}")
-        print(f"{Style.WARNING}  Symbol Tables Not Found{Style.RESET}")
-        print(f"{Style.WARNING}{'='*60}{Style.RESET}")
-        
+        logger.warning("=" * 60)
+        logger.warning("  Symbol Tables Not Found")
+        logger.warning("=" * 60)
+
         if banner:
-            print(f"\n{Style.INFO}Detected Kernel:{Style.RESET}")
-            print(f"  {banner[:100]}")
-        
-        print(f"\n{Style.INFO}Volatility 3 will attempt to download symbols automatically.{Style.RESET}")
-        print(f"{Style.INFO}If plugins fail, you may need to generate symbols manually:{Style.RESET}")
-        
-        print(f"\n{Style.BOLD}Option 1: Download pre-built symbols{Style.RESET}")
-        print(f"  - Check: https://isf-server.techanarchy.net/")
-        print(f"  - Place .json files in: volatility3/volatility3/symbols/linux/")
-        
-        print(f"\n{Style.BOLD}Option 2: Generate symbols with dwarf2json{Style.RESET}")
-        print(f"  # On a system with matching kernel + debug symbols:")
-        print(f"  sudo apt install linux-image-$(uname -r)-dbgsym")
-        print(f"  dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-$(uname -r) > symbols.json")
-        
-        print(f"\n{Style.BOLD}Option 3: Use --isf-url to specify ISF server{Style.RESET}")
-        print(f"  python linux_memory_analyzer.py -i image.lime --isf-url https://your-isf-server.com")
-        
-        print(f"\n{Style.WARNING}{'='*60}{Style.RESET}")
-        print(f"{Style.INFO}Continuing with analysis (some plugins may fail)...{Style.RESET}")
+            logger.info("Detected Kernel:")
+            logger.info("  %s", banner[:100])
+
+        logger.info("Volatility 3 will attempt to download symbols automatically.")
+        logger.info("If plugins fail, you may need to generate symbols manually:")
+
+        logger.info("Option 1: Download pre-built symbols")
+        logger.info("  - Check: https://isf-server.techanarchy.net/")
+        logger.info("  - Place .json files in: volatility3/volatility3/symbols/linux/")
+
+        logger.info("Option 2: Generate symbols with dwarf2json")
+        logger.info("  # On a system with matching kernel + debug symbols:")
+        logger.info("  sudo apt install linux-image-$(uname -r)-dbgsym")
+        logger.info("  dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-$(uname -r) > symbols.json")
+
+        logger.info("Option 3: Use --isf-url to specify ISF server")
+        logger.info("  python linux_memory_analyzer.py -i image.lime --isf-url https://your-isf-server.com")
+
+        logger.warning("=" * 60)
+        logger.info("Continuing with analysis (some plugins may fail)...")
     
     def _generate_summary(self, verbose: bool = True):
         """Generate analysis summary report."""
@@ -905,15 +884,15 @@ class LinuxMemoryAnalyzer:
                     f.write(f"  {filename} ({size:,} bytes)\n")
         
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-            print(f"{Style.HEADER}{Style.BOLD}  Analysis Complete{Style.RESET}")
-            print(f"{Style.HEADER}{Style.BOLD}{'='*60}{Style.RESET}")
-            print(f"\n{Style.INFO}Duration:{Style.RESET} {duration:.1f} seconds")
-            print(f"{Style.INFO}Successful:{Style.RESET} {successful} plugins")
+            logger.info("=" * 60)
+            logger.info("  Analysis Complete")
+            logger.info("=" * 60)
+            logger.info("Duration: %.1f seconds", duration)
+            logger.info("Successful: %d plugins", successful)
             if failed > 0:
-                print(f"{Style.WARNING}Failed:{Style.RESET} {failed} plugins")
-            print(f"\n{Style.SUCCESS}Output Directory:{Style.RESET} {self.output_dir}")
-            print(f"{Style.SUCCESS}Summary:{Style.RESET} {summary_path}")
+                logger.warning("Failed: %d plugins", failed)
+            logger.log(25, "Output Directory: %s", self.output_dir)
+            logger.log(25, "Summary: %s", summary_path)
 
 
 # ============================================================================
@@ -954,12 +933,12 @@ def quick_triage(image_path: str, vol_path: str = None, verbose: bool = True,
     
     ok, msg = runner.check_volatility()
     if not ok:
-        print(f"{Style.ERROR}Error: {msg}{Style.RESET}")
+        logger.error("Error: %s", msg)
         return {}
-    
+
     # First detect kernel banner
     if verbose:
-        print(f"\n{Style.HEADER}{Style.BOLD}Quick Triage Analysis{Style.RESET}")
+        logger.info("Quick Triage Analysis")
     runner.detect_kernel_banner(verbose)
     
     return runner.run_all_plugins(quick_plugins, verbose)
@@ -970,7 +949,8 @@ def quick_triage(image_path: str, vol_path: str = None, verbose: bool = True,
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    from lft.core.logging import setup_logging
+    setup_logging()
     
     parser = argparse.ArgumentParser(
         description="Linux Memory Analyzer - Volatility 3 automation for memory forensics",
@@ -1130,7 +1110,7 @@ Symbol Tables:
     if args.check:
         installed, msg = check_volatility_installed()
         if installed:
-            print(f"{Style.SUCCESS}[OK] {msg}{Style.RESET}")
+            logger.log(25, "[OK] %s", msg)
             # Try to get version
             vol_path = get_venv_vol_path() or shutil.which('vol') or shutil.which('vol.exe')
             if vol_path:
@@ -1139,12 +1119,13 @@ Symbol Tables:
                     if 'Framework' in result.stdout:
                         match = re.search(r'Framework (\d+\.\d+\.\d+)', result.stdout)
                         if match:
-                            print(f"  Version: {match.group(1)}")
-                except:
+                            logger.info("  Version: %s", match.group(1))
+                except Exception:
+                    logger.debug("Could not retrieve Volatility version string")
                     pass
             sys.exit(0)
         else:
-            print(f"{Style.ERROR}[MISSING] {msg}{Style.RESET}")
+            logger.error("[MISSING] %s", msg)
             print_setup_instructions()
             sys.exit(1)
     
@@ -1157,52 +1138,52 @@ Symbol Tables:
             sys.exit(1)
         else:
             parser.print_help()
-            print(f"\n{Style.ERROR}Error: -i/--image is required for analysis{Style.RESET}")
+            logger.error("Error: -i/--image is required for analysis")
             sys.exit(1)
     
     # Handle --banner flag (quick kernel identification)
     if args.banner:
         vol_path = args.vol_path or get_venv_vol_path() or shutil.which('vol') or shutil.which('vol.exe')
         if not vol_path:
-            print(f"{Style.ERROR}Error: Volatility 3 not found{Style.RESET}")
+            logger.error("Error: Volatility 3 not found")
             sys.exit(1)
-        
-        print(f"\n{Style.HEADER}Detecting kernel banner from: {args.image}{Style.RESET}\n")
-        
+
+        logger.info("Detecting kernel banner from: %s", args.image)
+
         try:
             cmd = [vol_path, '-f', args.image, '--offline', '-r', 'pretty', 'banners.Banners']
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            
+
             if result.stdout.strip():
-                print(result.stdout)
-                
+                logger.info("%s", result.stdout)
+
                 # Extract and highlight the kernel version
                 match = re.search(r'Linux version (\S+)', result.stdout)
                 if match:
-                    print(f"\n{Style.SUCCESS}Kernel Version: {match.group(1)}{Style.RESET}")
-                    print(f"\n{Style.INFO}To analyze this image, you need a symbol file for this kernel.{Style.RESET}")
-                    print(f"{Style.INFO}Generate it on a system with the same kernel using:{Style.RESET}")
-                    print(f"\n  # Install debug symbols")
-                    print(f"  sudo apt install linux-image-{match.group(1)}-dbgsym")
-                    print(f"\n  # Generate symbol file")
-                    print(f"  dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-{match.group(1)} > symbols.json")
-                    print(f"\n  # Then run analysis with:")
-                    print(f"  python {os.path.basename(__file__)} -i {args.image} -s /path/to/symbols/")
+                    logger.log(25, "Kernel Version: %s", match.group(1))
+                    logger.info("To analyze this image, you need a symbol file for this kernel.")
+                    logger.info("Generate it on a system with the same kernel using:")
+                    logger.info("  # Install debug symbols")
+                    logger.info("  sudo apt install linux-image-%s-dbgsym", match.group(1))
+                    logger.info("  # Generate symbol file")
+                    logger.info("  dwarf2json linux --elf /usr/lib/debug/boot/vmlinux-%s > symbols.json", match.group(1))
+                    logger.info("  # Then run analysis with:")
+                    logger.info("  python %s -i %s -s /path/to/symbols/", os.path.basename(__file__), args.image)
             else:
-                print(f"{Style.WARNING}No kernel banner found in image{Style.RESET}")
+                logger.warning("No kernel banner found in image")
                 if result.stderr:
-                    print(f"{Style.DIM}{result.stderr[:500]}{Style.RESET}")
+                    logger.debug("%s", result.stderr[:500])
         except subprocess.TimeoutExpired:
-            print(f"{Style.ERROR}Timeout detecting banner{Style.RESET}")
+            logger.error("Timeout detecting banner")
         except Exception as e:
-            print(f"{Style.ERROR}Error: {e}{Style.RESET}")
-        
+            logger.error("Error: %s", e)
+
         sys.exit(0)
     
     # Check if volatility is installed before proceeding
     installed, msg = check_volatility_installed()
     if not installed:
-        print(f"{Style.ERROR}Error: {msg}{Style.RESET}")
+        logger.error("Error: %s", msg)
         print_setup_instructions()
         sys.exit(1)
     
@@ -1224,22 +1205,22 @@ Symbol Tables:
     # Validate
     valid, msg = analyzer.validate()
     if not valid:
-        print(f"{Style.ERROR}Error: {msg}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: %s", msg)
         sys.exit(1)
-    
+
     # Run analysis
     try:
         results = analyzer.analyze(
-            include_optional=args.all, 
+            include_optional=args.all,
             verbose=verbose,
             skip_symbol_check=args.skip_symbol_check
         )
         sys.exit(0)
     except KeyboardInterrupt:
-        print(f"\n{Style.WARNING}Analysis interrupted by user{Style.RESET}", file=sys.stderr)
+        logger.warning("Analysis interrupted by user")
         sys.exit(130)
     except Exception as e:
-        print(f"{Style.ERROR}Error: {e}{Style.RESET}", file=sys.stderr)
+        logger.error("Error: %s", e)
         sys.exit(1)
 
 

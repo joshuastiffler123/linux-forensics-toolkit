@@ -33,7 +33,13 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 
-from lft_style import Style
+import logging
+
+from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT
+from lft.core.logging import setup_logging
+from lft.core.uac import UnmatchedWriter
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -128,6 +134,7 @@ class MiscArtifactsCollector:
         self.archive_files: List[Dict] = []
         self.hidden_dirs: List[str] = []
         self.scheduled_tasks: List[Dict] = []
+        self.unmatched = UnmatchedWriter()
 
         if self.is_tarball:
             self._open_tarball()
@@ -308,8 +315,7 @@ class MiscArtifactsCollector:
                         count += 1
 
         if verbose:
-            print(f"  {Style.INFO}[+] Found {count} archive files"
-                  f"{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Found %d archive files", count)
         return count
 
     # ------------------------------------------------------------------
@@ -345,8 +351,7 @@ class MiscArtifactsCollector:
         self.hidden_dirs.sort()
 
         if verbose:
-            print(f"  {Style.INFO}[+] Found {count} hidden directories"
-                  f"{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Found %d hidden directories", count)
         return count
 
     # ------------------------------------------------------------------
@@ -430,8 +435,8 @@ class MiscArtifactsCollector:
                     count += 1
 
         if verbose:
-            print(f"  {Style.INFO}[+] Collected {count} scheduled task "
-                  f"configurations{Style.RESET}", file=sys.stderr)
+            logger.info("[+] Collected %d scheduled task configurations",
+                        count)
         return count
 
     @staticmethod
@@ -484,10 +489,8 @@ class MiscArtifactsCollector:
         self.hostname = self._get_hostname()
 
         if verbose:
-            print(f"\n{Style.HEADER}{Style.BOLD}Miscellaneous Artifacts "
-                  f"Collector{Style.RESET}", file=sys.stderr)
-            print(f"  {Style.INFO}Source:{Style.RESET} {self.source_path}",
-                  file=sys.stderr)
+            logger.info("Miscellaneous Artifacts Collector")
+            logger.info("Source: %s", self.source_path)
 
         results = {}
         results['archive_files'] = self._collect_archive_files(verbose)
@@ -496,8 +499,7 @@ class MiscArtifactsCollector:
 
         if verbose:
             total = sum(results.values())
-            print(f"\n  {Style.SUCCESS}Total: {total} artifacts collected"
-                  f"{Style.RESET}", file=sys.stderr)
+            logger.log(25, "Total: %d artifacts collected", total)
 
         return results
 
@@ -569,9 +571,8 @@ class MiscArtifactsCollector:
             exported_count = sum(1 for e in self.scheduled_tasks
                                 if e.get('exported_file'))
             if exported_count:
-                print(f"  {Style.INFO}[+] Exported {exported_count} raw "
-                      f"scheduled task file(s) to: {raw_dir}{Style.RESET}",
-                      file=sys.stderr)
+                logger.info("[+] Exported %d raw scheduled task file(s) "
+                            "to: %s", exported_count, raw_dir)
 
             # Write CSV with Exported_File column
             path = os.path.join(output_dir,
@@ -602,13 +603,17 @@ class MiscArtifactsCollector:
 
         return output_files
 
+    def export_unmatched_csv(self, output_path: str) -> Optional[str]:
+        """Export lines that didn't match any expected pattern."""
+        return self.unmatched.export_csv(output_path)
+
 
 # ============================================================================
 # CLI
 # ============================================================================
 
 def main():
-    Style.enable_windows_ansi()
+    setup_logging()
 
     parser = argparse.ArgumentParser(
         description="Linux Miscellaneous Artifacts Collector",
@@ -638,9 +643,8 @@ Output Files:
 
     source = os.path.abspath(args.source)
     if not os.path.exists(source):
-        print(f"{Style.ERROR}Error: Source not found: {source}{Style.RESET}",
-              file=sys.stderr)
-        sys.exit(1)
+        logger.error("Error: Source not found: %s", source)
+        sys.exit(EXIT_SOURCE_NOT_FOUND)
 
     output_dir = os.path.abspath(args.output)
     os.makedirs(output_dir, exist_ok=True)
@@ -650,11 +654,17 @@ Output Files:
         collector.collect(verbose=not args.quiet)
         files = collector.export_csv(output_dir)
 
+        unmatched_path = os.path.join(output_dir,
+                                      f"{collector.hostname}_misc_unmatched.csv")
+        if collector.export_unmatched_csv(unmatched_path):
+            files.append(unmatched_path)
+            logger.warning("  %d lines did not match any known format -> %s",
+                           collector.unmatched.count, unmatched_path)
+
         if not args.quiet:
-            print(f"\n{Style.SUCCESS}Output files:{Style.RESET}",
-                  file=sys.stderr)
+            logger.log(25, "Output files:")
             for f in files:
-                print(f"  {f}", file=sys.stderr)
+                logger.info("  %s", f)
     finally:
         collector.close()
 
