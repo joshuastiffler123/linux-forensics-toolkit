@@ -22,10 +22,11 @@ cd linux-forensics-toolkit
 pip install -e .
 ```
 
-After install, `lfa` is available anywhere on your PATH:
+After install, both commands are available anywhere on your PATH:
 
 ```bash
-lfa -s hostname.tar.gz
+lfa -s hostname.tar.gz   # CLI analysis
+lfa-gui                  # graphical interface
 ```
 
 ### Manual install (no script)
@@ -37,10 +38,11 @@ lfa --help
 
 ### Run without installing
 
-If you prefer not to install, run directly:
+If you prefer not to install, run the package directly:
 
 ```bash
-python3 linux_analyzer.py -s hostname.tar.gz
+python3 -m lft                              # launch the GUI
+python3 src/lft/cli.py -s hostname.tar.gz   # CLI analysis
 ```
 
 ---
@@ -109,8 +111,8 @@ Memory forensics (optional):
 
 ### Main Orchestrator
 
-**`lfa` / `linux_analyzer.py`** runs all analyzers in parallel and collects
-results into a single `[hostname]_analysis/` directory.
+**`lfa`** runs all analyzers in parallel and collects results into a single
+`[hostname]_analysis/` directory.
 
 ---
 

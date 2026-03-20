@@ -78,7 +78,7 @@ if command -v lfa &>/dev/null; then
 else
     warn "'lfa' not found on PATH after install."
     warn "You may need to add your Python scripts directory to PATH, or run:"
-    warn "  $PYTHON $SCRIPT_DIR/linux_analyzer.py"
+    warn "  $PYTHON -m lft"
 fi
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ if [[ "${answer,,}" == "y" ]]; then
     $PIP install volatility3 --quiet
     info "Volatility 3 installed. Run 'lfa --memory <dump>' to use it."
 else
-    info "Skipping Volatility 3. Re-run '$PYTHON linux_memory_analyzer.py --setup' later if needed."
+    info "Skipping Volatility 3. Install later with: pip install volatility3"
 fi
 
 # ---------------------------------------------------------------------------
@@ -102,6 +102,9 @@ info "Installation complete!"
 echo ""
 echo "  Quick start:"
 echo "    lfa -s <uac_tarball_or_directory>"
+echo ""
+echo "  Launch the GUI:"
+echo "    lfa-gui"
 echo ""
 echo "  With bodyfile:"
 echo "    lfa -s collection.tar.gz --bodyfile system.body"
