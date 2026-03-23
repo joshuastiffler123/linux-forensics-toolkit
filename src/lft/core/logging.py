@@ -22,7 +22,7 @@ import sys
 
 from lft.core.style import Style
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # ---------------------------------------------------------------------------
 # Custom SUCCESS level (between INFO=20 and WARNING=30)

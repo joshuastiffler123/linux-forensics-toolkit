@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Any
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # Optional LZ4 support for compressed binary journals
 try:

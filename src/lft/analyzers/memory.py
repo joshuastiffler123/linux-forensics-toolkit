@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # ISF Server URLs for automatic symbol downloading
 ISF_SERVERS = [

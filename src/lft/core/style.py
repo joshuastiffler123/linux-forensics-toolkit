@@ -8,7 +8,7 @@ piped to a file or non-TTY destination.
 import os
 import sys
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 class Style:

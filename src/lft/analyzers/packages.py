@@ -36,7 +36,7 @@ from lft.core.uac import UACHandler, UnmatchedWriter
 
 logger = logging.getLogger(__name__)
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 # ============================================================================

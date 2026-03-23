@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import logging
 

@@ -77,7 +77,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterator, List, Optional, Set, Tuple, Union
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 from lft.core.errors import EXIT_ERROR, EXIT_SOURCE_NOT_FOUND, EXIT_SIGINT

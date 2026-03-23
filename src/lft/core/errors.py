@@ -22,7 +22,7 @@ Exit codes (for standalone CLI entry points)::
     EXIT_SIGINT          = 130 (Ctrl-C / SIGINT)
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 # ============================================================================

@@ -27,7 +27,7 @@ Handles .gz compressed versions automatically.
 Requirements: Python 3.6+ (standard library only, no pip install needed)
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __author__ = "Forensics Team"
 
 import os

@@ -63,7 +63,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Set, Tuple
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 logger = logging.getLogger(__name__)
 

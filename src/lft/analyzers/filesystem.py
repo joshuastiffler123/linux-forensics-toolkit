@@ -25,7 +25,7 @@ License: MIT
 Requirements: Python 3.6+ (standard library only)
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import argparse
 import csv
