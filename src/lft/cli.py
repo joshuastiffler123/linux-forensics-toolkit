@@ -1263,6 +1263,8 @@ def run_ioc_matcher(output_dir: str, hostname: str,
     except Exception as exc:
         result["error"] = str(exc)
 
+    return result
+
 def run_filesystem_timeline(source_path: str, output_dir: str, hostname: str) -> Dict:
     """Run the filesystem timeline generator."""
     result = {

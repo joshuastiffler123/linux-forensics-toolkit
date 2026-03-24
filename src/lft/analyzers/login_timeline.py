@@ -322,27 +322,27 @@ VALID_IPV6_PATTERN = re.compile(
 def is_valid_ip(ip_str: str) -> bool:
     """
     Check if a string is a valid IP address (IPv4 or IPv6).
-    
+
     Args:
         ip_str: Potential IP address string
-        
+
     Returns:
         True if it looks like a valid IP address
     """
     if not ip_str:
         return False
-    
+
     # Must be at least 7 chars for shortest IPv4 (1.1.1.1)
     if len(ip_str) < 7:
         return False
-    
+
     # Check IPv4
     if '.' in ip_str:
         # Must have exactly 3 dots for IPv4
         if ip_str.count('.') != 3:
             return False
         return bool(VALID_IPV4_PATTERN.match(ip_str))
-    
+
     # Check IPv6
     if ':' in ip_str:
         # Must have at least 2 colons for valid IPv6
@@ -350,8 +350,28 @@ def is_valid_ip(ip_str: str) -> bool:
             return False
         # Simple validation - proper hex chars and colons only
         return bool(VALID_IPV6_PATTERN.match(ip_str)) and len(ip_str) >= 3
-    
+
     return False
+
+
+def is_useful_source_ip(ip_str: str) -> bool:
+    """Return True if the IP is forensically meaningful as a source address.
+
+    Filters out link-local (fe80::), loopback (::1, 127.x), unspecified
+    (::, 0.0.0.0), and other non-routable addresses that add noise to
+    login timelines without providing investigative value.
+    """
+    if not ip_str:
+        return False
+    stripped = ip_str.strip().lower()
+    if not stripped or stripped in ('::1', '::', '0.0.0.0', '0:0:0:0:0:0:0:0',
+                                    '0:0:0:0:0:0:0:1'):
+        return False
+    if stripped.startswith('fe80:') or stripped.startswith('fe80%'):
+        return False
+    if stripped.startswith('127.'):
+        return False
+    return True
 
 
 def extract_ip_from_message(message: str) -> str:
@@ -391,9 +411,9 @@ def extract_ip_from_message(message: str) -> str:
     match = ipv6_pattern.search(message)
     if match:
         candidate = match.group(1)
-        if is_valid_ip(candidate):
+        if is_valid_ip(candidate) and is_useful_source_ip(candidate):
             return candidate
-    
+
     return ""
 
 # Words that look like usernames but are actually log message fragments.
@@ -689,6 +709,9 @@ def parse_utmp_record(data: bytes) -> Optional[Dict]:
             source_ip = ut_host
         else:
             source_ip = ""
+        # Filter out link-local and loopback IPs
+        if not is_useful_source_ip(source_ip):
+            source_ip = ""
         
         # Convert timestamp to UTC
         try:
@@ -855,7 +878,7 @@ def parse_lastlog(filepath: str, data: bytes = None, passwd_data: bytes = None) 
                                 event_type="LAST_LOGIN",
                                 source_file=filepath,
                                 username=username,
-                                source_ip=ll_host if ll_host and not ll_host.startswith(":") else "",
+                                source_ip=ll_host if ll_host and not ll_host.startswith(":") and is_useful_source_ip(ll_host) else "",
                                 terminal=ll_line,
                                 description=description
                             )
